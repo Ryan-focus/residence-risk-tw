@@ -39,8 +39,8 @@ describe('Residence Risk API', () => {
 	});
 
 	describe('normalizeAddress', () => {
-		it('converts 台 to 臺', () => {
-			expect(normalizeAddress('台北市')).toBe('臺北市');
+		it('converts 臺 to 台', () => {
+			expect(normalizeAddress('臺北市')).toBe('台北市');
 		});
 
 		it('converts fullwidth digits', () => {
@@ -48,7 +48,7 @@ describe('Residence Risk API', () => {
 		});
 
 		it('trims whitespace', () => {
-			expect(normalizeAddress('  臺北市  信義區  ')).toBe('臺北市信義區');
+			expect(normalizeAddress('  台北市  信義區  ')).toBe('台北市信義區');
 		});
 	});
 

@@ -24,8 +24,8 @@ export function normalizeAddress(raw: string): string {
 	addr = addr.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
 	// 全形英文 → 半形
 	addr = addr.replace(/[Ａ-Ｚａ-ｚ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-	// 「台」→「臺」統一（Nominatim 偏好「臺」）
-	addr = addr.replace(/台/g, '臺');
+	// 「臺」→「台」統一（Nominatim 偏好「台」）
+	addr = addr.replace(/臺/g, '台');
 	// 移除多餘空白
 	addr = addr.replace(/\s+/g, '');
 	return addr;
@@ -79,34 +79,96 @@ interface NominatimResult {
 }
 
 /** 呼叫 Nominatim 公開 API */
-async function queryNominatim(address: string): Promise<GeocodingResult | null> {
+async function queryNominatimOnce(query: string): Promise<NominatimResult | null> {
 	const params = new URLSearchParams({
-		q: address,
+		q: query,
 		format: 'json',
 		countrycodes: 'tw',
 		limit: '1',
 		addressdetails: '0',
 	});
 
-	const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-		headers: {
-			'User-Agent': 'ResidenceRiskTW/0.1 (open-source; https://github.com/Ryan-focus/residence-risk-tw)',
-		},
-	});
+	const url = `https://nominatim.openstreetmap.org/search?${params}`;
 
-	if (!response.ok) return null;
+	try {
+		const response = await fetch(url, {
+			headers: {
+				'User-Agent': 'ResidenceRiskTW/0.1 (open-source; https://github.com/Ryan-focus/residence-risk-tw)',
+			},
+		});
 
-	const results: NominatimResult[] = await response.json();
-	if (results.length === 0) return null;
+		if (!response.ok) return null;
+		const results: NominatimResult[] = await response.json();
+		return results.length > 0 ? results[0] : null;
+	} catch {
+		return null;
+	}
+}
 
-	const best = results[0];
-	return {
-		lat: parseFloat(best.lat),
-		lng: parseFloat(best.lon),
-		source: 'nominatim',
-		display_name: best.display_name,
-		accuracy_m: best.class === 'building' ? 10 : best.class === 'place' ? 100 : 500,
-	};
+/**
+ * Nominatim 漸進降級查詢
+ * 完整地址 → 去門牌 → 只到路 → 只到區 → 只到市
+ * Nominatim 台灣門牌覆蓋率低，需要 fallback
+ */
+async function queryNominatim(address: string): Promise<GeocodingResult | null> {
+	// 嘗試順序：完整 → 去號 → 去巷弄號 → 去路段 → 只到區
+	const fallbacks = buildFallbacks(address);
+
+	for (const query of fallbacks) {
+		const result = await queryNominatimOnce(query);
+		if (result) {
+			const isExact = query === fallbacks[0];
+			return {
+				lat: parseFloat(result.lat),
+				lng: parseFloat(result.lon),
+				source: 'nominatim',
+				display_name: result.display_name,
+				accuracy_m: isExact
+					? result.class === 'building'
+						? 10
+						: 100
+					: result.class === 'boundary'
+						? 2000
+						: 500,
+			};
+		}
+	}
+
+	return null;
+}
+
+/** 從完整地址產生漸進簡化的查詢序列 */
+function buildFallbacks(address: string): string[] {
+	const queries = [address];
+
+	// 去掉「X號」「X樓」「之X」
+	const noNumber = address.replace(/\d+號.*$/, '').replace(/\d+樓.*$/, '');
+	if (noNumber !== address && noNumber.length > 2) queries.push(noNumber);
+
+	// 去掉巷弄
+	const noAlley = noNumber.replace(/\d+巷.*$/, '').replace(/\d+弄.*$/, '');
+	if (noAlley !== noNumber && noAlley.length > 2) queries.push(noAlley);
+
+	// 到路/街層級
+	const roadMatch = address.match(/^(.+?[路街道])/);
+	if (roadMatch && !queries.includes(roadMatch[1])) {
+		queries.push(roadMatch[1]);
+	}
+
+	// 到區/鎮層級（台北市信義區）
+	const parts: string[] = [];
+	const cityMatch = address.match(/^(.+?[市縣])/);
+	if (cityMatch) {
+		const afterCity = address.substring(cityMatch[1].length);
+		const distMatch = afterCity.match(/^(.+?[區鎮鄉市])/);
+		if (distMatch) {
+			const district = cityMatch[1] + distMatch[1];
+			if (!queries.includes(district)) queries.push(district);
+		}
+		if (!queries.includes(cityMatch[1])) queries.push(cityMatch[1]);
+	}
+
+	return queries;
 }
 
 /** 主要入口：地址 → 座標 */

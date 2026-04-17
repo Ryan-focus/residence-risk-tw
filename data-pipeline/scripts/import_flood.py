@@ -3,150 +3,178 @@
 
 資料來源：經濟部水利署 — 淹水潛勢圖
 下載位置：https://data.gov.tw/dataset/25766
-格式：SHP（各縣市分檔）
+格式：SHP（各縣市分檔，每縣市 10 種降雨情境）
 座標系：TWD97 (EPSG:3826) → 匯入時轉換為 WGS84 (EPSG:4326)
 
-v0.2 修正：淹水潛勢圖不是重現期制，是定量降雨情境制
-  - 6 小時: 150/250/350mm
-  - 12 小時: 200/300/400mm
-  - 24 小時: 200/350/500/650mm
-  共 10 種情境
+實際欄位結構：
+  - GRIDCODE: int (1-6) 淹水深度等級
+  - type: str 淹水深度範圍 (e.g. '0-0.3', '0.3-0.5', '0.5-1', '1-2', '2-3', '3+')
+  - geometry: MultiPolygon
+
+檔名格式：{duration}h{rainfall}r.shp (e.g. 24h350r.shp)
+資料夾格式：{CountyName}-SHP/
 
 使用方式：
-    1. 下載 SHP 檔案到 data-pipeline/raw/flood/
-    2. pip install -r requirements.txt
-    3. python import_flood.py --input ../raw/flood/ --output ../processed/flood/
-
-依賴：
-    pip install geopandas pyproj shapely
+    cd data-pipeline/scripts
+    ../.venv/Scripts/python import_flood.py --input ../raw/flood/ --output ../processed/flood/
+    # MVP 只匯入 24h 三種情境：
+    ../.venv/Scripts/python import_flood.py --input ../raw/flood/ --output ../processed/flood/ --mvp-only
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import sqlite3
+import re
 import sys
+import io
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+
+# Windows console UTF-8
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 try:
     import geopandas as gpd
-    from shapely.geometry import mapping
 except ImportError:
     print("請先安裝依賴: pip install geopandas pyproj shapely", file=sys.stderr)
     sys.exit(1)
 
-from coord_transform import twd97_to_wgs84
-
-
-# 降雨情境解析（從檔名或屬性推斷）
-SCENARIO_PATTERNS = {
-    "6h150": ("6h_150mm", 6, 150),
-    "6h250": ("6h_250mm", 6, 250),
-    "6h350": ("6h_350mm", 6, 350),
-    "12h200": ("12h_200mm", 12, 200),
-    "12h300": ("12h_300mm", 12, 300),
-    "12h400": ("12h_400mm", 12, 400),
-    "24h200": ("24h_200mm", 24, 200),
-    "24h350": ("24h_350mm", 24, 350),
-    "24h500": ("24h_500mm", 24, 500),
-    "24h650": ("24h_650mm", 24, 650),
+# 縣市英文→中文對照
+COUNTY_NAMES = {
+    "TaipeiCity": "臺北市",
+    "NewTaipeiCity": "新北市",
+    "TaoyuanCity": "桃園市",
+    "TaichungCity": "臺中市",
+    "TainanCity": "臺南市",
+    "KaohsiungCity": "高雄市",
+    "KaohsiungCityV4": "高雄市",
+    "KeelungCity": "基隆市",
+    "HsinchuCity": "新竹市",
+    "HsinchuCounty": "新竹縣",
+    "ChiayiCity": "嘉義市",
+    "ChiayiCounty": "嘉義縣",
+    "MiaoliCounty": "苗栗縣",
+    "ChanghuaCounty": "彰化縣",
+    "NantouCounty": "南投縣",
+    "YunlinCounty": "雲林縣",
+    "PingtungCounty": "屏東縣",
+    "YilanCounty": "宜蘭縣",
+    "HualienCounty": "花蓮縣",
+    "TaitungCounty": "臺東縣",
+    "PenghuCounty": "澎湖縣",
+    "KinmenCounty": "金門縣",
+    "RenjiCounty": "連江縣",
 }
 
-# MVP 只聚焦三種 24 小時情境（v0.2 建議）
-MVP_SCENARIOS = {"24h_350mm", "24h_500mm", "24h_650mm"}
+# 降雨情境解析 — 支援所有已知檔名格式：
+#   6h150r, 06h150r, 06hr150, 06hr150mm, 06hr_150mm,
+#   PT06H150mm, tp_06h_r150_polygon_class_1,
+#   ty_06h_150mm, yl_06h_r150_polygon_class,
+#   12h200, 12Hr200r, 12H200R, N12H300R, rastert_n246502_Dissolve
+SCENARIO_PATTERNS = [
+    # prefix_DDh_rDDD_suffix or prefix_DDh_DDDmm
+    re.compile(r"(\d{1,2})[Hh]r?[_]?[rR]?(\d{3})", re.IGNORECASE),
+    # DDhDDDr (e.g. 6h150r, 24h350r)
+    re.compile(r"(\d{1,2})h(\d{3})r?$", re.IGNORECASE),
+    # DDhrDDD (e.g. 06hr150, 06hr350)
+    re.compile(r"(\d{1,2})hr[_]?(\d{3})", re.IGNORECASE),
+    # N12H300R
+    re.compile(r"N(\d{1,2})H(\d{3})R", re.IGNORECASE),
+]
 
+# MVP 聚焦 24 小時三種情境
+MVP_SCENARIOS = {(24, 350), (24, 500), (24, 650)}
 
-def parse_scenario_from_filename(filename: str) -> tuple[str, int, int] | None:
-    """從檔名推斷降雨情境"""
-    name = filename.lower().replace("_", "").replace("-", "").replace(" ", "")
-    for pattern, info in SCENARIO_PATTERNS.items():
-        if pattern in name:
-            return info
-    return None
-
-
-def classify_depth(depth_value: float) -> str:
-    """將淹水深度值分類"""
-    if depth_value <= 0:
-        return "0cm"
-    elif depth_value <= 0.5:
+# type 欄位 → 標準深度分類
+def normalize_depth(type_val: str) -> str:
+    """將 SHP 的 type 欄位轉為標準深度分類"""
+    t = str(type_val).strip()
+    if t in ("0-0.3", "0.3-0.5"):
         return "0-50cm"
-    elif depth_value <= 1.0:
+    elif t in ("0.5-1",):
         return "50-100cm"
-    elif depth_value <= 2.0:
+    elif t in ("1-2",):
         return "100-200cm"
-    else:
+    elif t in ("2-3", "3+", "3-5", "5+"):
         return ">200cm"
+    return t
 
 
-def process_shapefile(shp_path: Path, scenario_info: tuple[str, int, int]) -> List[Dict[str, Any]]:
-    """處理單一 SHP 檔案，轉換座標並產生記錄"""
-    scenario_name, duration, rainfall = scenario_info
+def process_county_dir(
+    county_dir: Path, mvp_only: bool
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """處理一個縣市資料夾"""
+    # 從資料夾名推斷縣市
+    dir_name = county_dir.name.replace("-SHP", "")
+    county = COUNTY_NAMES.get(dir_name, dir_name)
 
-    print(f"  讀取 {shp_path.name} (情境: {scenario_name})...")
-    gdf = gpd.read_file(shp_path)
-
-    # 轉換座標系 TWD97 → WGS84
-    if gdf.crs and gdf.crs.to_epsg() == 3826:
-        gdf = gdf.to_crs(epsg=4326)
-    elif gdf.crs and gdf.crs.to_epsg() != 4326:
-        print(f"    警告: 未預期的座標系 {gdf.crs}，嘗試轉為 WGS84")
-        gdf = gdf.to_crs(epsg=4326)
+    shp_files = sorted(county_dir.glob("*.shp"))
+    if not shp_files:
+        print(f"  跳過 {county_dir.name}（無 .shp 檔案）")
+        return county, []
 
     records = []
-    for _, row in gdf.iterrows():
-        geom = row.geometry
-        if geom is None or geom.is_empty:
+    for shp_path in shp_files:
+        duration, rainfall = None, None
+        for pat in SCENARIO_PATTERNS:
+            m = pat.search(shp_path.stem)
+            if m:
+                duration = int(m.group(1))
+                rainfall = int(m.group(2))
+                break
+
+        if duration is None:
+            # 最後嘗試：檔名中找 DDDmm 或 rDDD
+            print(f"  跳過 {shp_path.name}（無法辨識情境）")
             continue
 
-        bounds = geom.bounds  # (minx, miny, maxx, maxy) = (min_lng, min_lat, max_lng, max_lat)
-        centroid = geom.centroid
+        if mvp_only and (duration, rainfall) not in MVP_SCENARIOS:
+            continue
 
-        # 嘗試從屬性取得深度資訊
-        depth_class = "unknown"
-        for col in ["depth", "DEPTH", "淹水深度", "depth_class"]:
-            if col in row.index and row[col] is not None:
-                try:
-                    depth_class = classify_depth(float(row[col]))
-                except (ValueError, TypeError):
-                    depth_class = str(row[col])
-                break
+        scenario = f"{duration}h_{rainfall}mm"
+        print(f"  {county} / {scenario}...", end=" ")
 
-        # 嘗試取得縣市
-        county = ""
-        for col in ["COUNTY", "county", "縣市", "COUNTYNAME"]:
-            if col in row.index and row[col]:
-                county = str(row[col])
-                break
+        try:
+            gdf = gpd.read_file(shp_path)
+        except Exception as e:
+            print(f"讀取失敗: {e}")
+            continue
 
-        town = ""
-        for col in ["TOWN", "town", "鄉鎮", "TOWNNAME"]:
-            if col in row.index and row[col]:
-                town = str(row[col])
-                break
+        # 轉座標系
+        if gdf.crs and gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
 
-        records.append({
-            "rainfall_scenario": scenario_name,
-            "duration_hours": duration,
-            "rainfall_mm": rainfall,
-            "depth_class": depth_class,
-            "county": county,
-            "town": town,
-            "bbox_min_lat": round(bounds[1], 7),
-            "bbox_min_lng": round(bounds[0], 7),
-            "bbox_max_lat": round(bounds[3], 7),
-            "bbox_max_lng": round(bounds[2], 7),
-            "center_lat": round(centroid.y, 7),
-            "center_lng": round(centroid.x, 7),
-            "geojson": json.dumps(mapping(geom)),
-        })
+        count = 0
+        for _, row in gdf.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
 
-    print(f"    產生 {len(records)} 筆記錄")
-    return records
+            bounds = geom.bounds  # (minx, miny, maxx, maxy) = (min_lng, min_lat, max_lng, max_lat)
+            centroid = geom.centroid
+            depth_class = normalize_depth(row.get("type", "unknown"))
+
+            records.append({
+                "rainfall_scenario": scenario,
+                "duration_hours": duration,
+                "rainfall_mm": rainfall,
+                "depth_class": depth_class,
+                "county": county,
+                "bbox_min_lat": round(bounds[1], 7),
+                "bbox_min_lng": round(bounds[0], 7),
+                "bbox_max_lat": round(bounds[3], 7),
+                "bbox_max_lng": round(bounds[2], 7),
+                "center_lat": round(centroid.y, 7),
+                "center_lng": round(centroid.x, 7),
+            })
+            count += 1
+
+        print(f"{count} 筆")
+
+    return county, records
 
 
 def export_to_sql(records: List[Dict[str, Any]], output_path: Path, data_version: str) -> None:
@@ -157,65 +185,76 @@ def export_to_sql(records: List[Dict[str, Any]], output_path: Path, data_version
         f.write(f"-- 資料版本: {data_version}\n")
         f.write(f"-- 筆數: {len(records)}\n\n")
 
-        # 先插入資料源記錄
-        f.write("INSERT INTO rrw_data_sources (dataset_name, source_org, source_url, license, license_url, data_version, original_crs, downloaded_at, imported_at, record_count, attribution_text)\n")
-        f.write(f"VALUES ('淹水潛勢圖', '經濟部水利署', 'https://data.gov.tw/dataset/25766', '政府資料開放授權 v1', 'https://data.gov.tw/license', '{data_version}', 'EPSG:3826', '{datetime.now(timezone.utc).isoformat()}', '{datetime.now(timezone.utc).isoformat()}', {len(records)}, '資料來源：經濟部水利署淹水潛勢圖。依《水災潛勢資料公開辦法》，此資料僅供防災業務參考。');\n\n")
+        # 資料源記錄
+        now = datetime.now(timezone.utc).isoformat()
+        f.write(
+            f"INSERT INTO rrw_data_sources (dataset_name, source_org, source_url, license, license_url, "
+            f"data_version, original_crs, downloaded_at, imported_at, record_count, attribution_text) "
+            f"VALUES ('淹水潛勢圖', '經濟部水利署', 'https://data.gov.tw/dataset/25766', "
+            f"'政府資料開放授權 v1', 'https://data.gov.tw/license', '{data_version}', 'EPSG:3826', "
+            f"'{now}', '{now}', {len(records)}, "
+            f"'資料來源：經濟部水利署淹水潛勢圖。依《水災潛勢資料公開辦法》，此資料僅供防災業務參考。');\n\n"
+        )
 
-        for rec in records:
-            geojson_escaped = rec["geojson"].replace("'", "''") if rec["geojson"] else "NULL"
+        # 淹水區記錄（批次 INSERT）
+        batch_size = 50
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
             f.write(
-                f"INSERT INTO rrw_flood_zones (rainfall_scenario, duration_hours, rainfall_mm, depth_class, county, town, "
-                f"bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, center_lat, center_lng, geojson, data_version) "
-                f"VALUES ('{rec['rainfall_scenario']}', {rec['duration_hours']}, {rec['rainfall_mm']}, '{rec['depth_class']}', "
-                f"'{rec['county']}', '{rec['town']}', {rec['bbox_min_lat']}, {rec['bbox_min_lng']}, {rec['bbox_max_lat']}, "
-                f"{rec['bbox_max_lng']}, {rec['center_lat']}, {rec['center_lng']}, '{geojson_escaped}', '{data_version}');\n"
+                "INSERT INTO rrw_flood_zones (rainfall_scenario, duration_hours, rainfall_mm, "
+                "depth_class, county, bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, "
+                "center_lat, center_lng, data_version) VALUES\n"
             )
+            values = []
+            for rec in batch:
+                values.append(
+                    f"  ('{rec['rainfall_scenario']}', {rec['duration_hours']}, {rec['rainfall_mm']}, "
+                    f"'{rec['depth_class']}', '{rec['county']}', "
+                    f"{rec['bbox_min_lat']}, {rec['bbox_min_lng']}, {rec['bbox_max_lat']}, {rec['bbox_max_lng']}, "
+                    f"{rec['center_lat']}, {rec['center_lng']}, '{data_version}')"
+                )
+            f.write(",\n".join(values) + ";\n\n")
 
-    print(f"已匯出 SQL: {output_path} ({len(records)} 筆)")
+    print(f"\n已匯出: {output_path}")
+    print(f"  筆數: {len(records)}")
+    size_kb = output_path.stat().st_size / 1024
+    print(f"  大小: {size_kb:.0f} KB")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="匯入淹水潛勢圖資")
-    parser.add_argument("--input", required=True, help="SHP 檔案目錄")
-    parser.add_argument("--output", required=True, help="輸出目錄")
+    parser = argparse.ArgumentParser(description="匯入淹水潛勢圖資（SHP → D1 SQL）")
+    parser.add_argument("--input", required=True, help="SHP 資料夾根目錄（含各縣市子目錄）")
+    parser.add_argument("--output", required=True, help="SQL 輸出目錄")
     parser.add_argument("--version", default="2024", help="資料版本")
-    parser.add_argument("--mvp-only", action="store_true", help="只匯入 MVP 三種情境 (24h)")
+    parser.add_argument("--mvp-only", action="store_true", help="只匯入 24h 三種情境 (350/500/650mm)")
     args = parser.parse_args()
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not input_dir.exists():
-        print(f"錯誤: 輸入目錄不存在: {input_dir}", file=sys.stderr)
+    county_dirs = sorted([d for d in input_dir.iterdir() if d.is_dir() and d.name.endswith("-SHP")])
+    if not county_dirs:
+        print(f"錯誤: 在 {input_dir} 找不到 *-SHP 資料夾", file=sys.stderr)
         sys.exit(1)
 
-    shp_files = list(input_dir.rglob("*.shp"))
-    if not shp_files:
-        print(f"錯誤: 在 {input_dir} 找不到 .shp 檔案", file=sys.stderr)
-        print("請先從 https://data.gov.tw/dataset/25766 下載淹水潛勢圖", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"找到 {len(shp_files)} 個 SHP 檔案")
+    mode = "MVP (24h: 350/500/650mm)" if args.mvp_only else "完整 (10 種情境)"
+    print(f"匯入模式: {mode}")
+    print(f"找到 {len(county_dirs)} 個縣市\n")
 
     all_records = []
-    for shp in sorted(shp_files):
-        scenario = parse_scenario_from_filename(shp.stem)
-        if scenario is None:
-            print(f"  跳過 {shp.name}（無法辨識情境）")
-            continue
-        if args.mvp_only and scenario[0] not in MVP_SCENARIOS:
-            print(f"  跳過 {shp.name}（非 MVP 情境）")
-            continue
-        records = process_shapefile(shp, scenario)
+    for county_dir in county_dirs:
+        county, records = process_county_dir(county_dir, args.mvp_only)
         all_records.extend(records)
 
     if all_records:
-        export_to_sql(all_records, output_dir / "flood_import.sql", args.version)
-        print(f"\n完成！共 {len(all_records)} 筆記錄")
-        print(f"下一步: wrangler d1 execute rrw-db --local --file={output_dir / 'flood_import.sql'}")
+        sql_file = output_dir / "flood_import.sql"
+        export_to_sql(all_records, sql_file, args.version)
+        print(f"\n下一步:")
+        print(f"  cd api")
+        print(f"  npx wrangler d1 execute rrw-db --local --file=../data-pipeline/processed/flood/flood_import.sql")
     else:
-        print("\n沒有產生任何記錄，請檢查輸入檔案")
+        print("\n沒有產生任何記錄")
 
 
 if __name__ == "__main__":
