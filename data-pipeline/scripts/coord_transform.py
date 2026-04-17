@@ -43,13 +43,13 @@ def wgs84_to_twd97(lng: float, lat: float) -> Tuple[float, float]:
 TEST_POINTS = [
     {
         "name": "台北101",
-        "twd97": (302573.0, 2770409.0),
+        "twd97": (306885.0, 2769662.0),
         "wgs84_expected": (121.5637, 25.0340),
         "tolerance_m": 50,
     },
     {
         "name": "高雄85大樓",
-        "twd97": (176591.0, 2500841.0),
+        "twd97": (178159.0, 2501355.0),
         "wgs84_expected": (120.3012, 22.6108),
         "tolerance_m": 50,
     },
