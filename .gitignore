@@ -168,3 +168,6 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# SA 文件（二進位 docx，不 commit）
+*.docx
