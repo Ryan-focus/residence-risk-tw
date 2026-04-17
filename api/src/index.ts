@@ -3,6 +3,9 @@
  * Cloudflare Workers + D1
  */
 
+import { geocode, normalizeAddress } from './geocode';
+import { assessFlood } from './flood';
+
 interface ErrorBody {
 	error: string;
 	code: string;
@@ -91,6 +94,8 @@ async function handleMetaVersions(env: Env): Promise<Response> {
 }
 
 async function handleAssess(request: Request, env: Env): Promise<Response> {
+	const start = Date.now();
+
 	let body: { address?: string };
 	try {
 		body = await request.json();
@@ -103,14 +108,55 @@ async function handleAssess(request: Request, env: Env): Promise<Response> {
 		return errorResponse(400, 'INVALID_ADDRESS', '請提供 address 欄位');
 	}
 
-	// TODO: Phase 1 — 接上地理編碼 + 淹水查詢
-	// 目前回傳 stub，標示 API 合約已定義
+	// 1. 地理編碼
+	const location = await geocode(env.DB, address);
+	if (!location) {
+		await logQuery(env.DB, null, null, 'none', 404, Date.now() - start);
+		return errorResponse(404, 'ADDRESS_NOT_FOUND', '無法將地址轉換為座標，請確認地址是否正確');
+	}
+
+	// 2. 淹水風險查詢
+	const flood = await assessFlood(env.DB, location.lat, location.lng);
+
+	const elapsed = Date.now() - start;
+	await logQuery(env.DB, null, null, location.source, 200, elapsed);
+
 	return jsonResponse({
-		status: 'processing',
-		message: '風險評估功能開發中，目前僅提供 API 結構預覽',
-		input: { address },
+		address: normalizeAddress(address),
+		location: {
+			lat: location.lat,
+			lng: location.lng,
+			source: location.source,
+			display_name: location.display_name,
+		},
+		flood,
+		meta: {
+			response_ms: elapsed,
+			api_version: '0.1.0-dev',
+		},
 		disclaimer: '本工具使用政府公開資料，僅供防災參考，不構成任何土地使用或交易決策依據。',
 	});
+}
+
+async function logQuery(
+	db: D1Database,
+	districtCode: string | null,
+	county: string | null,
+	geocodeSource: string,
+	statusCode: number,
+	responseMs: number,
+): Promise<void> {
+	try {
+		await db
+			.prepare(
+				`INSERT INTO rrw_query_log (district_code, county, dimensions, response_ms, status_code, geocode_source)
+				 VALUES (?, ?, '["flood"]', ?, ?, ?)`,
+			)
+			.bind(districtCode, county, responseMs, statusCode, geocodeSource)
+			.run();
+	} catch {
+		// 日誌寫入失敗不影響主流程
+	}
 }
 
 async function handleGetReport(id: string, _env: Env): Promise<Response> {

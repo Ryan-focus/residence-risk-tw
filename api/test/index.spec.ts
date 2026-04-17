@@ -1,6 +1,7 @@
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 import worker from '../src/index';
+import { normalizeAddress } from '../src/geocode';
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
@@ -37,18 +38,21 @@ describe('Residence Risk API', () => {
 		});
 	});
 
-	describe('POST /v1/assess', () => {
-		it('returns stub response for valid address', async () => {
-			const response = await SELF.fetch('https://example.com/v1/assess', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ address: '台北市信義區信義路五段7號' }),
-			});
-			const body = await response.json<{ input: { address: string } }>();
-			expect(response.status).toBe(200);
-			expect(body.input.address).toBe('台北市信義區信義路五段7號');
+	describe('normalizeAddress', () => {
+		it('converts 台 to 臺', () => {
+			expect(normalizeAddress('台北市')).toBe('臺北市');
 		});
 
+		it('converts fullwidth digits', () => {
+			expect(normalizeAddress('１２３號')).toBe('123號');
+		});
+
+		it('trims whitespace', () => {
+			expect(normalizeAddress('  臺北市  信義區  ')).toBe('臺北市信義區');
+		});
+	});
+
+	describe('POST /v1/assess', () => {
 		it('returns 400 for missing address', async () => {
 			const response = await SELF.fetch('https://example.com/v1/assess', {
 				method: 'POST',
