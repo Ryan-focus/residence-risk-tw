@@ -28,12 +28,21 @@ function jsonResponse(data: unknown, status = 200): Response {
 	});
 }
 
-// CORS (SA §8.4)
-const ALLOWED_ORIGINS = ['http://localhost:3000', 'http://localhost:8787'];
+// CORS (SA §8.4) — env-aware: ALLOWED_ORIGINS env var is comma-separated
+const DEV_ORIGINS = ['http://localhost:3000', 'http://localhost:8787'];
 
-function corsHeaders(request: Request): Record<string, string> {
+function getAllowedOrigins(env: Env): string[] {
+	const extra = (env as Record<string, unknown>).ALLOWED_ORIGINS;
+	if (typeof extra === 'string' && extra.length > 0) {
+		return [...DEV_ORIGINS, ...extra.split(',').map((s) => s.trim())];
+	}
+	return DEV_ORIGINS;
+}
+
+function corsHeaders(request: Request, env: Env): Record<string, string> {
 	const origin = request.headers.get('Origin') || '';
-	const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+	const origins = getAllowedOrigins(env);
+	const allowed = origins.includes(origin) ? origin : '';
 	return {
 		'Access-Control-Allow-Origin': allowed,
 		'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -42,9 +51,20 @@ function corsHeaders(request: Request): Record<string, string> {
 	};
 }
 
-function withCors(response: Response, request: Request): Response {
+// Security headers
+const SECURITY_HEADERS: Record<string, string> = {
+	'X-Content-Type-Options': 'nosniff',
+	'X-Frame-Options': 'DENY',
+	'Referrer-Policy': 'strict-origin-when-cross-origin',
+	'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+};
+
+function withCors(response: Response, request: Request, env: Env): Response {
 	const headers = new Headers(response.headers);
-	for (const [key, value] of Object.entries(corsHeaders(request))) {
+	for (const [key, value] of Object.entries(corsHeaders(request, env))) {
+		headers.set(key, value);
+	}
+	for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
 		headers.set(key, value);
 	}
 	return new Response(response.body, {
@@ -93,8 +113,17 @@ async function handleMetaVersions(env: Env): Promise<Response> {
 	}
 }
 
+const MAX_BODY_BYTES = 4096;
+const MAX_ADDRESS_LENGTH = 200;
+
 async function handleAssess(request: Request, env: Env): Promise<Response> {
 	const start = Date.now();
+
+	// Guard: reject oversized bodies
+	const contentLength = parseInt(request.headers.get('Content-Length') || '0', 10);
+	if (contentLength > MAX_BODY_BYTES) {
+		return errorResponse(413, 'PAYLOAD_TOO_LARGE', '請求內容過大');
+	}
 
 	let body: { address?: string };
 	try {
@@ -106,6 +135,10 @@ async function handleAssess(request: Request, env: Env): Promise<Response> {
 	const address = body?.address?.trim();
 	if (!address) {
 		return errorResponse(400, 'INVALID_ADDRESS', '請提供 address 欄位');
+	}
+
+	if (address.length > MAX_ADDRESS_LENGTH) {
+		return errorResponse(400, 'INVALID_ADDRESS', `地址長度不可超過 ${MAX_ADDRESS_LENGTH} 字`);
 	}
 
 	// 1. 地理編碼
@@ -193,7 +226,7 @@ export default {
 
 		// CORS preflight
 		if (request.method === 'OPTIONS') {
-			return withCors(new Response(null, { status: 204 }), request);
+			return withCors(new Response(null, { status: 204 }), request, env);
 		}
 
 		// Root — 簡單導引
@@ -210,21 +243,22 @@ export default {
 					},
 				}),
 				request,
+				env,
 			);
 		}
 
 		// Route matching
 		const handler = matchRoute(request.method, pathname);
 		if (!handler) {
-			return withCors(errorResponse(404, 'NOT_FOUND', `${request.method} ${pathname} 不存在`), request);
+			return withCors(errorResponse(404, 'NOT_FOUND', `${request.method} ${pathname} 不存在`), request, env);
 		}
 
 		try {
 			const response = await handler(request, env);
-			return withCors(response, request);
+			return withCors(response, request, env);
 		} catch (err) {
 			console.error('Unhandled error:', err);
-			return withCors(errorResponse(500, 'INTERNAL_ERROR', '伺服器內部錯誤'), request);
+			return withCors(errorResponse(500, 'INTERNAL_ERROR', '伺服器內部錯誤'), request, env);
 		}
 	},
 } satisfies ExportedHandler<Env>;

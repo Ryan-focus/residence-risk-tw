@@ -2,6 +2,8 @@
 
 整合台灣政府公開資料，輸入地址即可查詢該地點的淹水風險。
 
+**線上版**：https://residence-risk-web.pages.dev
+
 > **免責聲明**：本工具使用經濟部水利署淹水潛勢圖，依《水災潛勢資料公開辦法》，此資料僅供防災業務參考，不構成任何土地使用、購屋、保險等決策依據。
 
 ## 功能
@@ -9,6 +11,8 @@
 - 台灣地址輸入 → 自動地理編碼（Nominatim，支援模糊比對）
 - 淹水風險評估（24 小時 350/500/650mm 三種降雨情境）
 - 0-100 分五級評分，附資料來源與免責聲明
+- 互動式地圖標記（Leaflet + OpenStreetMap）
+- 風險情境明細展開檢視
 - 地理編碼結果快取（30 天，僅存 hash 不存原地址）
 - RESTful JSON API
 
@@ -16,6 +20,9 @@
 
 | 層級 | 技術 |
 |------|------|
+| 前端 | Next.js 14 (Static Export) + Tailwind CSS |
+| 地圖 | Leaflet / react-leaflet + OpenStreetMap |
+| 託管（前端） | Cloudflare Pages |
 | API | Cloudflare Workers (TypeScript) |
 | 資料庫 | Cloudflare D1 (SQLite) |
 | 地理編碼 | Nominatim（漸進降級：完整地址 → 路 → 區 → 市） |
@@ -35,13 +42,20 @@
 
 ```bash
 git clone https://github.com/Ryan-focus/residence-risk-tw.git
-cd residence-risk-tw/api
-npm install
+cd residence-risk-tw
+
+# API
+cd api && npm install
+
+# 前端
+cd ../web && npm install
 ```
 
 ### 2. D1 資料庫
 
 ```bash
+cd api
+
 # 建立 D1（首次）
 wrangler d1 create rrw-db
 # 將 database_id 填入 wrangler.jsonc
@@ -54,7 +68,7 @@ wrangler d1 migrations apply rrw-db --local
 
 ```bash
 # 建立 Python 虛擬環境
-cd ../data-pipeline
+cd data-pipeline
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt   # Windows
 # source .venv/bin/activate && pip install -r requirements.txt  # macOS/Linux
@@ -74,15 +88,58 @@ wrangler d1 execute rrw-db --local --file=../data-pipeline/processed/flood/flood
 ### 4. 啟動開發伺服器
 
 ```bash
+# 終端 1：API
 cd api
 npm run dev
 # http://localhost:8787
+
+# 終端 2：前端
+cd web
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8787/v1 npm run dev
+# http://localhost:3000
 ```
 
 ### 5. 測試
 
 ```bash
+cd api
 npm test
+```
+
+## 部署
+
+### API（Cloudflare Workers）
+
+```bash
+cd api
+
+# 套用遠端 schema（首次）
+wrangler d1 migrations apply rrw-db --remote
+
+# 匯入資料到遠端（首次）
+wrangler d1 export rrw-db --output data.sql --table rrw_flood_zones --no-schema
+wrangler d1 execute rrw-db --remote --file data.sql
+
+# 部署 Worker
+wrangler deploy
+
+# 設定 CORS（替換為你的 Pages 網域）
+echo "https://your-project.pages.dev" | wrangler secret put ALLOWED_ORIGINS
+```
+
+### 前端（Cloudflare Pages）
+
+```bash
+cd web
+
+# 建置（替換為你的 API 網域）
+NEXT_PUBLIC_API_BASE_URL=https://your-api.workers.dev/v1 npm run build
+
+# 建立 Pages 專案（首次）
+wrangler pages project create your-project --production-branch main
+
+# 部署
+wrangler pages deploy out --project-name your-project
 ```
 
 ## API 端點
@@ -133,9 +190,10 @@ npm test
 
 | HTTP | Code | 說明 |
 |------|------|------|
-| 400 | `INVALID_ADDRESS` | 地址格式無法辨識 |
+| 400 | `INVALID_ADDRESS` | 地址格式無法辨識或超過 200 字 |
+| 400 | `INVALID_REQUEST` | 請求格式錯誤 |
 | 404 | `ADDRESS_NOT_FOUND` | 地理編碼找不到對應位置 |
-| 404 | `REPORT_NOT_FOUND` | 報告不存在或已過期 |
+| 413 | `PAYLOAD_TOO_LARGE` | 請求內容超過 4KB |
 | 500 | `INTERNAL_ERROR` | 伺服器內部錯誤 |
 
 ## 專案結構
@@ -144,22 +202,51 @@ npm test
 residence-risk-tw/
 ├── api/                        # Cloudflare Workers API
 │   ├── src/
-│   │   ├── index.ts            # 路由與主入口
+│   │   ├── index.ts            # 路由、CORS、安全標頭
 │   │   ├── geocode.ts          # 地理編碼（Nominatim + 快取）
 │   │   └── flood.ts            # 淹水風險查詢與評分
 │   ├── migrations/
 │   │   └── 0001_initial_schema.sql
 │   ├── test/
 │   └── wrangler.jsonc
+├── web/                        # Next.js 前端
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── layout.tsx      # 根佈局（zh-Hant-TW）
+│   │   │   └── page.tsx        # 主頁面
+│   │   ├── components/
+│   │   │   ├── AddressSearch    # 地址輸入
+│   │   │   ├── ConsentModal     # 使用須知
+│   │   │   ├── DisclaimerBanner # 免責警告列
+│   │   │   ├── ResultCard       # 風險分數卡
+│   │   │   ├── RiskDetails      # 情境明細表
+│   │   │   ├── MapView          # Leaflet 地圖
+│   │   │   ├── ResponseMeta     # 回應資訊
+│   │   │   └── Footer           # 資料來源連結
+│   │   ├── hooks/
+│   │   │   └── useAssess.ts     # 查詢狀態管理
+│   │   └── lib/
+│   │       ├── api.ts           # API 呼叫
+│   │       └── types.ts         # TypeScript 型別
+│   ├── wrangler.toml
+│   └── next.config.mjs
 ├── data-pipeline/              # 資料匯入工具
 │   ├── scripts/
 │   │   ├── import_flood.py     # 淹水圖資 SHP → D1 SQL
 │   │   └── coord_transform.py  # TWD97 ↔ WGS84
 │   ├── raw/                    # 原始政府資料（不 commit）
 │   └── processed/              # 處理後資料（不 commit）
-├── web/                        # 前端（規劃中）
 └── docs/                       # 文件（規劃中）
 ```
+
+## 安全措施
+
+- CORS 白名單透過環境變數管理，不寫死於程式碼
+- 安全標頭：`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`
+- 請求大小限制（4KB）與地址長度限制（200 字）
+- SQL 參數化查詢，防止注入攻擊
+- 地址僅以 SHA-256 hash 快取，不儲存原始地址
+- 所有敏感資料透過 `.gitignore` 排除
 
 ## 淹水評分標準
 
@@ -181,6 +268,7 @@ residence-risk-tw/
 |--------|----------|------|
 | [淹水潛勢圖](https://data.gov.tw/dataset/25766) | 經濟部水利署 | 政府資料開放授權 v1 |
 | 地理編碼 | [OpenStreetMap](https://www.openstreetmap.org/) via Nominatim | ODbL |
+| 底圖 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | ODbL |
 
 ## 開發路線
 
@@ -188,7 +276,8 @@ residence-risk-tw/
 - [x] 淹水潛勢資料匯入（19 縣市）
 - [x] 地理編碼（Nominatim + 漸進降級 + 快取）
 - [x] 淹水風險評分
-- [ ] 前端 MVP（地圖 + 查詢 + 結果呈現）
+- [x] 前端 MVP（地圖 + 查詢 + 結果呈現）
+- [x] 雲端部署（Cloudflare Workers + Pages）
 - [ ] 地震風險（活動斷層 + 土壤液化）
 - [ ] 空氣品質風險
 - [ ] PDF 報告下載
