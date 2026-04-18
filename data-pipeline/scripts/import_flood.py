@@ -165,6 +165,10 @@ def process_county_dir(
         if gdf.crs and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
 
+        # 關鍵：把 MultiPolygon 拆成個別 Polygon，否則整個縣市合為一筆、
+        # bbox 會橫跨數十公里，Worker 端 fallback 無法判斷具體位置是否在淹水區。
+        gdf = gdf.explode(index_parts=False, ignore_index=True)
+
         count = 0
         for _, row in gdf.iterrows():
             geom = row.geometry
