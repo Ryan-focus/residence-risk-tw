@@ -88,6 +88,24 @@ SCENARIO_PATTERNS = [
 # MVP 聚焦 24 小時三種情境
 MVP_SCENARIOS = {(24, 350), (24, 500), (24, 650)}
 
+# D1 / SQLite 單一 INSERT 語句 ~1 MB 上限；geojson 留 400 KB 緩衝
+_GEOJSON_MAX_CHARS = 400_000
+_SIMPLIFY_TOLERANCES = (0.00005, 0.0001, 0.0005, 0.001, 0.002, 0.005)
+
+
+def _build_safe_flood_geojson(geom) -> str | None:
+    for tol in _SIMPLIFY_TOLERANCES:
+        try:
+            s_geom = geom.simplify(tolerance=tol, preserve_topology=True)
+            if s_geom is None or s_geom.is_empty:
+                continue
+            s = json.dumps(s_geom.__geo_interface__, separators=(",", ":"), ensure_ascii=False)
+            if len(s) <= _GEOJSON_MAX_CHARS:
+                return s
+        except Exception:
+            continue
+    return None
+
 # type 欄位 → 標準深度分類
 def normalize_depth(type_val: str) -> str:
     """將 SHP 的 type 欄位轉為標準深度分類"""
@@ -157,16 +175,11 @@ def process_county_dir(
             centroid = geom.centroid
             depth_class = normalize_depth(row.get("type", "unknown"))
 
-            # 儲存完整 polygon（geojson）供 Worker 做真正的 point-in-polygon 判定。
-            # 精度用 6 位小數（~11 cm）即可，並略為 simplify 以減少 D1 儲存成本。
-            simplified = geom.simplify(tolerance=0.00005, preserve_topology=True)
-            if simplified.is_empty or simplified is None:
-                simplified = geom
-            try:
-                geojson_obj = simplified.__geo_interface__
-                geojson_str = json.dumps(geojson_obj, separators=(",", ":"), ensure_ascii=False)
-            except Exception:
-                geojson_str = None
+            # 儲存完整 polygon 供 Worker 做真正 point-in-polygon 判定。
+            # 有些淹水區（沿海平原或整條河川流域）polygon 非常大，單一 INSERT
+            # 可能撞到 D1/SQLite 的 ~1MB 語句上限；漸進加重 simplify，
+            # 仍超出就回 None（Worker 走 centroid-fallback 模式）。
+            geojson_str = _build_safe_flood_geojson(geom)
 
             records.append({
                 "rainfall_scenario": scenario,
