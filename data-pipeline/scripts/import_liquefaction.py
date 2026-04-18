@@ -51,12 +51,45 @@ def normalize_tw(s: str) -> str:
 LP_MAP: dict[str, str] = {
     "高": "高", "H": "高", "HIGH": "高", "3": "高",
     "中": "中", "M": "中", "MED": "中", "MEDIUM": "中", "2": "中",
-    "低": "低", "L": "低", "LOW": "低", "1": "低",
+    "低": "低", "L": "低", "LOW": "低", "1": "低", "0": "低",
+    "高潛勢": "高", "中潛勢": "中", "低潛勢": "低",
 }
 
 
 def normalize_level(raw) -> str | None:
-    return LP_MAP.get(str(raw).strip().upper())
+    key = str(raw).strip().upper()
+    # 優先原始字（避免 upper 誤傷中文）
+    if str(raw).strip() in LP_MAP:
+        return LP_MAP[str(raw).strip()]
+    return LP_MAP.get(key)
+
+
+# geologycloud.tw 使用的 area → 台灣縣市 對照（單一縣市時用）
+AREA_TO_COUNTY: dict[str, str] = {
+    "臺北": "台北市",       # 含新北市，這裡以主要縣市表示
+    "基隆": "基隆市",
+    "桃園": "桃園市",
+    "新竹": "新竹縣",       # 含新竹市
+    "苗栗": "苗栗縣",
+    "臺中": "台中市",
+    "彰化": "彰化縣",
+    "南投": "南投縣",
+    "雲林": "雲林縣",
+    "嘉義": "嘉義縣",       # 含嘉義市
+    "臺南": "台南市",
+    "高雄": "高雄市",
+    "屏東": "屏東縣",
+    "恆春半島": "屏東縣",
+    "宜蘭": "宜蘭縣",
+    "花蓮": "花蓮縣",
+    "臺東": "台東縣",
+}
+
+
+def county_from_filename(stem: str) -> str:
+    """檔名格式 '臺北_低' → '台北市'"""
+    area = stem.split("_")[0]
+    return normalize_tw(AREA_TO_COUNTY.get(area, area))
 
 
 def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
@@ -74,9 +107,9 @@ def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
             print(f"  [ERROR] 重投影失敗 {path.name}: {e}", file=sys.stderr)
             return
 
-    # 偵測液化等級欄位
+    # 偵測液化等級欄位（含 geologycloud.tw 的「分級」/「classify」）
     level_col = None
-    for col in ["LP", "lp", "LEVEL", "level", "液化潛勢", "潛勢等級", "LiqLevel"]:
+    for col in ["分級", "LP", "lp", "LEVEL", "level", "液化潛勢", "潛勢等級", "LiqLevel", "classify"]:
         if col in gdf.columns:
             level_col = col
             break
@@ -88,12 +121,15 @@ def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
     county_col = next((c for c in ["COUNTY", "county", "縣市", "COUNTYNAME"] if c in gdf.columns), None)
     district_col = next((c for c in ["TOWN", "town", "鄉鎮市區", "TOWNNAME"] if c in gdf.columns), None)
 
-    # 從檔名推斷縣市（fallback）
-    filename_county = normalize_tw(path.stem.split("_")[0]) if "_" in path.stem else ""
+    # 從檔名推斷縣市（fallback）— geologycloud.tw 下載檔名格式：'臺北_低' → '台北市'
+    filename_county = county_from_filename(path.stem) if "_" in path.stem else ""
+
+    # MultiPolygon → 逐個 Polygon（避免一個超大 bbox 覆蓋整個縣市）
+    exploded = gdf.explode(index_parts=False, ignore_index=True)
 
     batch: list[str] = []
 
-    for _, row in gdf.iterrows():
+    for _, row in exploded.iterrows():
         if row.geometry is None or row.geometry.is_empty:
             stats["skipped"] += 1
             continue
@@ -114,20 +150,17 @@ def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
             stats["skipped"] += 1
             continue
 
-        # 簡化幾何
-        simplified = row.geometry.simplify(0.0001)
-        geojson_str = json.dumps(mapping(simplified), ensure_ascii=False)
-
+        # geojson 欄位 API 未讀取 — 為避免 D1 statement 過長，先不存
         def esc(s: str) -> str:
             return s.replace("'", "''")
 
         stmt = (
             f"INSERT OR IGNORE INTO rrw_liquefaction_zones "
             f"(level,county,district,bbox_min_lat,bbox_min_lng,bbox_max_lat,bbox_max_lng,"
-            f"center_lat,center_lng,geojson,data_version) VALUES ("
+            f"center_lat,center_lng,data_version) VALUES ("
             f"'{level}','{esc(county)}','{esc(district)}',"
             f"{round(bounds[1],7)},{round(bounds[0],7)},{round(bounds[3],7)},{round(bounds[2],7)},"
-            f"{round(centroid.y,7)},{round(centroid.x,7)},'{esc(geojson_str)}',"
+            f"{round(centroid.y,7)},{round(centroid.x,7)},"
             f"'{datetime.now().strftime('%Y-%m')}');"
         )
         batch.append(stmt)
@@ -135,10 +168,10 @@ def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
         stats["by_level"][level] = stats["by_level"].get(level, 0) + 1
 
     if batch:
-        out_f.write("BEGIN;\n")
+        # D1 不允許 SQL 層級 BEGIN/COMMIT — 直接寫 INSERT 即可
         for stmt in batch:
             out_f.write(stmt + "\n")
-        out_f.write("COMMIT;\n\n")
+        out_f.write("\n")
 
     print(f"  {path.name}: {len(batch)} 筆寫入", file=sys.stderr)
 
