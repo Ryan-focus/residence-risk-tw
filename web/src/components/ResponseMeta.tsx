@@ -4,8 +4,8 @@ import { AssessResponse } from "@/lib/types";
 
 const SOURCE_LABELS: Record<string, string> = {
   cache: "快取",
+  map8: "圖霸 Map8",
   nominatim: "Nominatim",
-  tgos: "TGOS",
 };
 
 export default function ResponseMeta({ data }: { data: AssessResponse }) {

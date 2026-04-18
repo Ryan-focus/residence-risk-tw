@@ -5,6 +5,7 @@
 
 import { geocode, normalizeAddress } from './geocode';
 import { assessFlood } from './flood';
+import { assessEarthquake } from './earthquake';
 
 interface ErrorBody {
 	error: string;
@@ -32,7 +33,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 const DEV_ORIGINS = ['http://localhost:3000', 'http://localhost:8787'];
 
 function getAllowedOrigins(env: Env): string[] {
-	const extra = (env as Record<string, unknown>).ALLOWED_ORIGINS;
+	const extra = (env as unknown as Record<string, unknown>).ALLOWED_ORIGINS;
 	if (typeof extra === 'string' && extra.length > 0) {
 		return [...DEV_ORIGINS, ...extra.split(',').map((s) => s.trim())];
 	}
@@ -142,14 +143,17 @@ async function handleAssess(request: Request, env: Env): Promise<Response> {
 	}
 
 	// 1. 地理編碼
-	const location = await geocode(env.DB, address);
+	const location = await geocode(env.DB, address, env.MAP8_API_KEY ?? '');
 	if (!location) {
 		await logQuery(env.DB, null, null, 'none', 404, Date.now() - start);
 		return errorResponse(404, 'ADDRESS_NOT_FOUND', '無法將地址轉換為座標，請確認地址是否正確');
 	}
 
-	// 2. 淹水風險查詢
-	const flood = await assessFlood(env.DB, location.lat, location.lng);
+	// 2. 風險評估（flood + earthquake 並行）
+	const [flood, earthquake] = await Promise.all([
+		assessFlood(env.DB, location.lat, location.lng),
+		assessEarthquake(env.DB, location.lat, location.lng),
+	]);
 
 	const elapsed = Date.now() - start;
 	await logQuery(env.DB, null, null, location.source, 200, elapsed);
@@ -163,9 +167,10 @@ async function handleAssess(request: Request, env: Env): Promise<Response> {
 			display_name: location.display_name,
 		},
 		flood,
+		earthquake,
 		meta: {
 			response_ms: elapsed,
-			api_version: '0.1.0-dev',
+			api_version: '0.2.0-dev',
 		},
 		disclaimer: '本工具使用政府公開資料，僅供防災參考，不構成任何土地使用或交易決策依據。',
 	});

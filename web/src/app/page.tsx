@@ -7,7 +7,7 @@ import ConsentModal from "@/components/ConsentModal";
 import DisclaimerBanner from "@/components/DisclaimerBanner";
 import AddressSearch from "@/components/AddressSearch";
 import ResultCard from "@/components/ResultCard";
-import RiskDetails from "@/components/RiskDetails";
+import { FloodDetails, EarthquakeDetails } from "@/components/RiskDetails";
 import ResponseMeta from "@/components/ResponseMeta";
 import Footer from "@/components/Footer";
 
@@ -35,7 +35,22 @@ export default function Home() {
 
         {data && (
           <>
-            <ResultCard flood={data.flood} />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ResultCard
+                title="淹水風險分數"
+                score={data.flood.score}
+                level={data.flood.level}
+                color={data.flood.color}
+                disclaimer={data.flood.disclaimer}
+              />
+              <ResultCard
+                title="地震風險分數"
+                score={data.earthquake.score}
+                level={data.earthquake.level}
+                color={data.earthquake.color}
+                disclaimer={data.earthquake.disclaimer}
+              />
+            </div>
 
             {data.location && (
               <MapView
@@ -46,7 +61,16 @@ export default function Home() {
               />
             )}
 
-            <RiskDetails risks={data.flood.risks} />
+            <section className="space-y-2">
+              <h2 className="text-sm font-semibold text-gray-700">淹水細節</h2>
+              <FloodDetails risks={data.flood.risks} />
+            </section>
+
+            <section className="space-y-2">
+              <h2 className="text-sm font-semibold text-gray-700">地震細節</h2>
+              <EarthquakeDetails earthquake={data.earthquake} />
+            </section>
+
             <ResponseMeta data={data} />
           </>
         )}

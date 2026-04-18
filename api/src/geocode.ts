@@ -1,32 +1,27 @@
 /**
- * 地理編碼模組 — Nominatim（公開 API）
+ * 地理編碼模組
  *
- * 策略（v0.2 §3.2 簡化版）：
- *   1. 查 D1 快取（rrw_geocode_cache）
- *   2. 快取未命中 → 呼叫 Nominatim
- *   3. 結果寫回快取（30 天 TTL）
- *
- * 未來 TGOS 可用時，在 step 2 前面插入 TGOS 即可。
+ * 查詢策略：
+ *   1. D1 快取（rrw_geocode_cache，30 天 TTL）
+ *   2. Map8 台灣圖霸 API — 內政部資料，近千萬筆建物門牌，WGS84
+ *   3. Nominatim（最終 fallback）
+ *   4. 寫回快取
  */
 
 export interface GeocodingResult {
 	lat: number;
 	lng: number;
-	source: 'cache' | 'nominatim' | 'tgos';
+	source: 'cache' | 'map8' | 'nominatim';
 	display_name: string;
 	accuracy_m: number | null;
 }
 
-/** 地址正規化（v0.2 §3.4 — 簡易版） */
+/** 地址正規化 */
 export function normalizeAddress(raw: string): string {
 	let addr = raw.trim();
-	// 全形 → 半形數字
 	addr = addr.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-	// 全形英文 → 半形
 	addr = addr.replace(/[Ａ-Ｚａ-ｚ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-	// 「臺」→「台」統一（Nominatim 偏好「台」）
 	addr = addr.replace(/臺/g, '台');
-	// 移除多餘空白
 	addr = addr.replace(/\s+/g, '');
 	return addr;
 }
@@ -39,7 +34,8 @@ async function addressHash(normalized: string): Promise<string> {
 	return hex.substring(0, 16);
 }
 
-/** 查 D1 快取 */
+// ── D1 快取 ───────────────────────────────────────────────────────────────────
+
 async function lookupCache(db: D1Database, hash: string): Promise<GeocodingResult | null> {
 	const row = await db
 		.prepare(
@@ -50,16 +46,9 @@ async function lookupCache(db: D1Database, hash: string): Promise<GeocodingResul
 		.first<{ lat: number; lng: number; source: string; accuracy_m: number | null }>();
 
 	if (!row) return null;
-	return {
-		lat: row.lat,
-		lng: row.lng,
-		source: 'cache',
-		display_name: '(cached)',
-		accuracy_m: row.accuracy_m,
-	};
+	return { lat: row.lat, lng: row.lng, source: 'cache', display_name: '(cached)', accuracy_m: row.accuracy_m };
 }
 
-/** 寫入快取 */
 async function writeCache(db: D1Database, hash: string, result: GeocodingResult): Promise<void> {
 	await db
 		.prepare(
@@ -70,122 +59,138 @@ async function writeCache(db: D1Database, hash: string, result: GeocodingResult)
 		.run();
 }
 
-interface NominatimResult {
-	lat: string;
-	lon: string;
-	display_name: string;
-	class: string;
-	importance: number;
+// ── Map8 台灣圖霸 ─────────────────────────────────────────────────────────────
+
+interface Map8Response {
+	status: string;
+	results: {
+		formatted_address: string;
+		geometry: { location: { lat: number; lng: number } };
+		likelihood: number; // 0-100，100 = 完全匹配
+	}[];
 }
 
-/** 呼叫 Nominatim 公開 API */
-async function queryNominatimOnce(query: string): Promise<NominatimResult | null> {
-	const params = new URLSearchParams({
-		q: query,
-		format: 'json',
-		countrycodes: 'tw',
-		limit: '1',
-		addressdetails: '0',
-	});
+/**
+ * Map8 geocoding API
+ * 文件：https://www.map8.zone/map8-api-docs/
+ * 申請試用金鑰：https://docs.google.com/forms/d/1BMN0cnmROBvtfU1JAxk-2sR9KcZdViHMNFtsyTR12l8
+ */
+async function queryMap8(address: string, apiKey: string): Promise<GeocodingResult | null> {
+	if (!apiKey) return null;
 
-	const url = `https://nominatim.openstreetmap.org/search?${params}`;
+	const params = new URLSearchParams({ key: apiKey, address });
+	const url = `https://api.map8.zone/v2/place/geocode/json?${params}`;
 
 	try {
-		const response = await fetch(url, {
-			headers: {
-				'User-Agent': 'ResidenceRiskTW/0.1 (open-source; https://github.com/Ryan-focus/residence-risk-tw)',
-			},
-		});
+		const res = await fetch(url);
+		if (!res.ok) return null;
 
-		if (!response.ok) return null;
-		const results: NominatimResult[] = await response.json();
-		return results.length > 0 ? results[0] : null;
+		const data: Map8Response = await res.json();
+		if (data.status !== 'OK' || !data.results?.length) return null;
+
+		const { lat, lng } = data.results[0].geometry.location;
+		const likelihood = data.results[0].likelihood ?? 0;
+
+		// likelihood 100 = 完全匹配（建物門牌），越低精度越差
+		const accuracy_m =
+			likelihood >= 95 ? 5 :
+			likelihood >= 80 ? 50 :
+			likelihood >= 60 ? 200 :
+			500;
+
+		return {
+			lat,
+			lng,
+			source: 'map8',
+			display_name: data.results[0].formatted_address,
+			accuracy_m,
+		};
 	} catch {
 		return null;
 	}
 }
 
-/**
- * Nominatim 漸進降級查詢
- * 完整地址 → 去門牌 → 只到路 → 只到區 → 只到市
- * Nominatim 台灣門牌覆蓋率低，需要 fallback
- */
-async function queryNominatim(address: string): Promise<GeocodingResult | null> {
-	// 嘗試順序：完整 → 去號 → 去巷弄號 → 去路段 → 只到區
-	const fallbacks = buildFallbacks(address);
+// ── Nominatim fallback ────────────────────────────────────────────────────────
 
-	for (const query of fallbacks) {
-		const result = await queryNominatimOnce(query);
-		if (result) {
-			const isExact = query === fallbacks[0];
-			return {
-				lat: parseFloat(result.lat),
-				lng: parseFloat(result.lon),
-				source: 'nominatim',
-				display_name: result.display_name,
-				accuracy_m: isExact
-					? result.class === 'building'
-						? 10
-						: 100
-					: result.class === 'boundary'
-						? 2000
-						: 500,
-			};
-		}
-	}
-
-	return null;
+interface NominatimResult {
+	lat: string;
+	lon: string;
+	display_name: string;
+	class: string;
 }
 
-/** 從完整地址產生漸進簡化的查詢序列 */
+async function queryNominatimOnce(query: string): Promise<NominatimResult | null> {
+	const params = new URLSearchParams({ q: query, format: 'json', countrycodes: 'tw', limit: '1', addressdetails: '0' });
+	try {
+		const res = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+			headers: { 'User-Agent': 'ResidenceRiskTW/0.2 (open-source; https://github.com/Ryan-focus/residence-risk-tw)' },
+		});
+		if (!res.ok) return null;
+		const results: NominatimResult[] = await res.json();
+		return results[0] ?? null;
+	} catch {
+		return null;
+	}
+}
+
 function buildFallbacks(address: string): string[] {
 	const queries = [address];
-
-	// 去掉「X號」「X樓」「之X」
 	const noNumber = address.replace(/\d+號.*$/, '').replace(/\d+樓.*$/, '');
 	if (noNumber !== address && noNumber.length > 2) queries.push(noNumber);
-
-	// 去掉巷弄
 	const noAlley = noNumber.replace(/\d+巷.*$/, '').replace(/\d+弄.*$/, '');
 	if (noAlley !== noNumber && noAlley.length > 2) queries.push(noAlley);
-
-	// 到路/街層級
 	const roadMatch = address.match(/^(.+?[路街道])/);
-	if (roadMatch && !queries.includes(roadMatch[1])) {
-		queries.push(roadMatch[1]);
-	}
-
-	// 到區/鎮層級（台北市信義區）
-	const parts: string[] = [];
+	if (roadMatch && !queries.includes(roadMatch[1])) queries.push(roadMatch[1]);
 	const cityMatch = address.match(/^(.+?[市縣])/);
 	if (cityMatch) {
-		const afterCity = address.substring(cityMatch[1].length);
-		const distMatch = afterCity.match(/^(.+?[區鎮鄉市])/);
-		if (distMatch) {
-			const district = cityMatch[1] + distMatch[1];
-			if (!queries.includes(district)) queries.push(district);
-		}
+		const distMatch = address.substring(cityMatch[1].length).match(/^(.+?[區鎮鄉市])/);
+		if (distMatch && !queries.includes(cityMatch[1] + distMatch[1])) queries.push(cityMatch[1] + distMatch[1]);
 		if (!queries.includes(cityMatch[1])) queries.push(cityMatch[1]);
 	}
-
 	return queries;
 }
 
-/** 主要入口：地址 → 座標 */
-export async function geocode(db: D1Database, rawAddress: string): Promise<GeocodingResult | null> {
+async function queryNominatim(address: string): Promise<GeocodingResult | null> {
+	for (const query of buildFallbacks(address)) {
+		const r = await queryNominatimOnce(query);
+		if (r) {
+			const isExact = query === address;
+			return {
+				lat: parseFloat(r.lat),
+				lng: parseFloat(r.lon),
+				source: 'nominatim',
+				display_name: r.display_name,
+				accuracy_m: isExact ? (r.class === 'building' ? 10 : 100) : (r.class === 'boundary' ? 2000 : 500),
+			};
+		}
+	}
+	return null;
+}
+
+// ── 主要入口 ──────────────────────────────────────────────────────────────────
+
+export async function geocode(
+	db: D1Database,
+	rawAddress: string,
+	map8ApiKey: string,
+): Promise<GeocodingResult | null> {
 	const normalized = normalizeAddress(rawAddress);
 	const hash = await addressHash(normalized);
 
-	// 1. 查快取
 	const cached = await lookupCache(db, hash);
 	if (cached) return cached;
 
-	// 2. Nominatim
-	const result = await queryNominatim(normalized);
-	if (!result) return null;
+	const map8 = await queryMap8(normalized, map8ApiKey);
+	if (map8) {
+		await writeCache(db, hash, map8);
+		return map8;
+	}
 
-	// 3. 寫快取
-	await writeCache(db, hash, result);
+	const nom = await queryNominatim(normalized);
+	if (nom) {
+		await writeCache(db, hash, nom);
+		return nom;
+	}
 
-	return result;
+	return null;
 }

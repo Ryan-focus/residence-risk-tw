@@ -54,6 +54,38 @@ const TABLES = [
 		geocode_source TEXT,
 		queried_at TEXT NOT NULL DEFAULT (datetime('now'))
 	)`,
+	`CREATE TABLE IF NOT EXISTS rrw_fault_zones (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		fault_name TEXT NOT NULL,
+		fault_class INTEGER NOT NULL,
+		county TEXT NOT NULL,
+		bbox_min_lat REAL NOT NULL,
+		bbox_min_lng REAL NOT NULL,
+		bbox_max_lat REAL NOT NULL,
+		bbox_max_lng REAL NOT NULL,
+		center_lat REAL NOT NULL,
+		center_lng REAL NOT NULL,
+		geojson TEXT,
+		data_source_id INTEGER REFERENCES rrw_data_sources(id),
+		data_version TEXT NOT NULL,
+		imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS rrw_liquefaction_zones (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		level TEXT NOT NULL,
+		county TEXT NOT NULL,
+		district TEXT,
+		bbox_min_lat REAL NOT NULL,
+		bbox_min_lng REAL NOT NULL,
+		bbox_max_lat REAL NOT NULL,
+		bbox_max_lng REAL NOT NULL,
+		center_lat REAL NOT NULL,
+		center_lng REAL NOT NULL,
+		geojson TEXT,
+		data_source_id INTEGER REFERENCES rrw_data_sources(id),
+		data_version TEXT NOT NULL,
+		imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
 ];
 
 beforeAll(async () => {

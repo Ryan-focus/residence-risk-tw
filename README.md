@@ -8,8 +8,9 @@
 
 ## 功能
 
-- 台灣地址輸入 → 自動地理編碼（Nominatim，支援模糊比對）
+- 台灣地址輸入 → 自動地理編碼（Map8 圖霸 / Nominatim，支援模糊比對）
 - 淹水風險評估（24 小時 350/500/650mm 三種降雨情境）
+- 地震風險評估（活動斷層地質敏感區 + 土壤液化潛勢，斷層 60% / 液化 40%）
 - 0-100 分五級評分，附資料來源與免責聲明
 - 互動式地圖標記（Leaflet + OpenStreetMap）
 - 風險情境明細展開檢視
@@ -27,6 +28,7 @@
 | 資料庫 | Cloudflare D1 (SQLite) |
 | 地理編碼 | Nominatim（漸進降級：完整地址 → 路 → 區 → 市） |
 | 淹水資料 | 經濟部水利署淹水潛勢圖 (SHP → D1) |
+| 地震資料 | 中央地質調查所活動斷層 + 經濟部地調所土壤液化 (SHP/GeoJSON → D1) |
 | 座標轉換 | pyproj (TWD97 EPSG:3826 → WGS84 EPSG:4326) |
 | 測試 | Vitest + Cloudflare Workers Pool |
 
@@ -83,6 +85,27 @@ python import_flood.py --input ../raw/flood/ --output ../processed/flood/ --mvp-
 # 寫入 D1
 cd ../../api
 wrangler d1 execute rrw-db --local --file=../data-pipeline/processed/flood/flood_import.sql
+```
+
+### 3b. 匯入地震資料（活動斷層 + 土壤液化）
+
+```bash
+cd data-pipeline/scripts
+
+# 活動斷層地質敏感區（data.gov.tw/dataset/100220，SHP，TWD97）
+python import_fault.py \
+    --input ../raw/fault/ \
+    --output ../processed/fault/fault_import.sql
+
+# 土壤液化潛勢圖（data.gov.tw/dataset/28691，GeoJSON/SHP）
+python import_liquefaction.py \
+    --input ../raw/liquefaction/ \
+    --output ../processed/liquefaction/liquefaction_import.sql
+
+# 寫入 D1
+cd ../../api
+wrangler d1 execute rrw-db --local --file=../data-pipeline/processed/fault/fault_import.sql
+wrangler d1 execute rrw-db --local --file=../data-pipeline/processed/liquefaction/liquefaction_import.sql
 ```
 
 ### 4. 啟動開發伺服器
@@ -182,6 +205,23 @@ wrangler pages deploy out --project-name your-project
     ],
     "disclaimer": "..."
   },
+  "earthquake": {
+    "score": 86,
+    "level": "極高",
+    "color": "#ef4444",
+    "fault": {
+      "score": 90,
+      "risks": [
+        { "fault_name": "車籠埔斷層", "fault_class": 1, "distance_m": null }
+      ]
+    },
+    "liquefaction": {
+      "score": 80,
+      "has_data": true,
+      "risks": [ { "level": "高", "distance_m": null } ]
+    },
+    "disclaimer": "..."
+  },
   "meta": { "response_ms": 1351 }
 }
 ```
@@ -203,10 +243,12 @@ residence-risk-tw/
 ├── api/                        # Cloudflare Workers API
 │   ├── src/
 │   │   ├── index.ts            # 路由、CORS、安全標頭
-│   │   ├── geocode.ts          # 地理編碼（Nominatim + 快取）
-│   │   └── flood.ts            # 淹水風險查詢與評分
+│   │   ├── geocode.ts          # 地理編碼（Map8 + Nominatim + 快取）
+│   │   ├── flood.ts            # 淹水風險查詢與評分
+│   │   └── earthquake.ts       # 斷層 + 液化查詢與評分
 │   ├── migrations/
-│   │   └── 0001_initial_schema.sql
+│   │   ├── 0001_initial_schema.sql
+│   │   └── 0002_earthquake_schema.sql
 │   ├── test/
 │   └── wrangler.jsonc
 ├── web/                        # Next.js 前端
@@ -232,8 +274,10 @@ residence-risk-tw/
 │   └── next.config.mjs
 ├── data-pipeline/              # 資料匯入工具
 │   ├── scripts/
-│   │   ├── import_flood.py     # 淹水圖資 SHP → D1 SQL
-│   │   └── coord_transform.py  # TWD97 ↔ WGS84
+│   │   ├── import_flood.py         # 淹水圖資 SHP → D1 SQL
+│   │   ├── import_fault.py         # 活動斷層 SHP → D1 SQL
+│   │   ├── import_liquefaction.py  # 土壤液化 GeoJSON/SHP → D1 SQL
+│   │   └── coord_transform.py      # TWD97 ↔ WGS84
 │   ├── raw/                    # 原始政府資料（不 commit）
 │   └── processed/              # 處理後資料（不 commit）
 └── docs/                       # 文件（規劃中）
@@ -262,12 +306,33 @@ residence-risk-tw/
 | 距淹水區 < 100m | 20 | 低 |
 | 無淹水潛勢 | 5 | 極低 |
 
+## 地震評分標準
+
+**斷層子分數**（取最大值）：
+
+| 條件 | 分數 |
+|------|------|
+| 點在第一類敏感區內 | 90 |
+| 點在第二類敏感區內 | 70 |
+| 距第一類 < 200m | 55 |
+| 距第二類 < 200m | 45 |
+| 距第一類 < 500m | 35 |
+| 距第二類 < 500m | 25 |
+| 更遠 | 10 |
+| 查無資料 | 5 |
+
+**液化子分數**：點在高/中/低潛勢區內 → 80 / 50 / 20；無資料 → 5。
+
+**綜合**：有液化資料時 `0.6 × 斷層 + 0.4 × 液化`；無液化資料的縣市僅用斷層分數。
+
 ## 資料來源
 
 | 資料集 | 提供機關 | 授權 |
 |--------|----------|------|
 | [淹水潛勢圖](https://data.gov.tw/dataset/25766) | 經濟部水利署 | 政府資料開放授權 v1 |
-| 地理編碼 | [OpenStreetMap](https://www.openstreetmap.org/) via Nominatim | ODbL |
+| [活動斷層地質敏感區](https://data.gov.tw/dataset/100220) | 中央地質調查所 | 政府資料開放授權 v1 |
+| [土壤液化潛勢圖](https://data.gov.tw/dataset/28691) | 經濟部地質調查及礦業管理中心 | 政府資料開放授權 v1 |
+| 地理編碼 | [Map8 台灣圖霸](https://www.map8.zone/) + [OpenStreetMap](https://www.openstreetmap.org/) via Nominatim | Map8 商業 / ODbL |
 | 底圖 | [OpenStreetMap](https://www.openstreetmap.org/copyright) | ODbL |
 
 ## 開發路線
@@ -278,7 +343,7 @@ residence-risk-tw/
 - [x] 淹水風險評分
 - [x] 前端 MVP（地圖 + 查詢 + 結果呈現）
 - [x] 雲端部署（Cloudflare Workers + Pages）
-- [ ] 地震風險（活動斷層 + 土壤液化）
+- [x] 地震風險（活動斷層 + 土壤液化）
 - [ ] 空氣品質風險
 - [ ] PDF 報告下載
 - [ ] 公開 REST API

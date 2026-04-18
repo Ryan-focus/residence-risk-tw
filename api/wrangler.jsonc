@@ -16,5 +16,9 @@
 			"database_name": "rrw-db",
 			"database_id": "8f35001a-59ba-45f2-9c8e-462f4b2360ac"
 		}
-	]
+	],
+	"vars": {
+		// 本機開發用空值；正式環境請執行：wrangler secret put MAP8_API_KEY
+		"MAP8_API_KEY": ""
+	}
 }
