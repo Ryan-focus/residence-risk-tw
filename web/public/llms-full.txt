@@ -54,32 +54,61 @@ Response 200:
 {
   "address": "台北市信義區信義路五段7號",
   "location": {
-    "lat": 25.033,
-    "lng": 121.567,
-    "source": "nominatim",
+    "lat": 25.033, "lng": 121.567, "source": "nominatim",
     "display_name": "信義區, 臺北市, 臺灣"
   },
   "flood": {
-    "score": 95,
-    "level": "極高",
-    "color": "#ef4444",
+    "score": 95, "level": "極高", "color": "#ef4444",
     "risks": [
       { "scenario": "24h_350mm", "duration_hours": 24, "rainfall_mm": 350, "depth_class": "0-50cm", "distance_m": null }
+    ],
+    "reasoning": [
+      "綜合判定：**極高**風險 — 常態性豪雨即可能淹水...",
+      "此地點在 24 小時累積雨量 350 mm 的情境下即會淹水..."
     ],
     "disclaimer": "..."
   },
   "earthquake": {
-    "score": 86,
-    "level": "極高",
-    "color": "#ef4444",
+    "score": 86, "level": "極高", "color": "#ef4444",
     "fault": { "score": 90, "risks": [ { "fault_name": "車籠埔斷層", "fault_class": 1, "distance_m": null } ] },
     "liquefaction": { "score": 80, "has_data": true, "risks": [ { "level": "高", "distance_m": null } ] },
+    "history": {
+      "available": true, "radius_km": 50, "years_back": 10,
+      "events": [
+        {
+          "earthquake_no": "2022137",
+          "origin_time": "2022-09-18T06:44:15Z",
+          "magnitude": 6.8, "depth_km": 7.0,
+          "epicenter_lat": 23.14, "epicenter_lng": 121.20,
+          "epicenter_distance_km": 42.3,
+          "location_description": "台東縣政府北方44.7公里",
+          "source_url": "https://...",
+          "estimated_intensity": {
+            "level": "6強", "method": "nearest_station",
+            "nearest_station": { "name": "池上", "county": "花蓮縣", "distance_km": 3.2, "pga_gal": 420.1 }
+          }
+        }
+      ]
+    },
+    "reasoning": [
+      "綜合判定：**極高**風險 — 地表錯動與強震感共存情境...",
+      "**斷層：位於第一類活動斷層地質敏感區內**（車籠埔斷層兩側 500 m 範圍）...",
+      "**液化：位於土壤液化高潛勢區**...",
+      "**歷史地震佐證：** 近 10 年震央 50 km 內有 N 次顯著有感地震..."
+    ],
     "disclaimer": "..."
   },
-  "meta": { "response_ms": 1351, "api_version": "0.2.0-dev" },
+  "meta": { "response_ms": 1351, "api_version": "0.2.0" },
   "disclaimer": "本工具使用政府公開資料，僅供防災參考..."
 }
 ```
+
+### 新欄位說明
+
+- `flood.reasoning` / `earthquake.reasoning`: 陣列，每個元素是一句自然語言解釋。包含簡易 markdown **bold** 標記。Agent 應依序呈現給使用者，不要省略。
+- `earthquake.history`: 歷史顯著有感地震（CWB E-A0015），查詢震央在本地 50 km 內、過去 10 年的紀錄。
+  - `available: false` = 管理員尚未匯入資料（執行 `data-pipeline/scripts/import_earthquake_history.py` 即可）
+  - `events[].estimated_intensity`: **最近測站實測震度**（method = `"nearest_station"`）。若最近 CWB 測站距本地 > 15 km 則為 null，不做外推。
 
 錯誤碼：
 

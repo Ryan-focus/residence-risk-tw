@@ -184,7 +184,7 @@
       },
       "FloodAssessment": {
         "type": "object",
-        "required": ["score", "level", "color", "risks", "disclaimer"],
+        "required": ["score", "level", "color", "risks", "reasoning", "disclaimer"],
         "properties": {
           "score": { "type": "integer", "minimum": 0, "maximum": 100 },
           "level": { "type": "string", "enum": ["極低", "低", "中", "高", "極高"] },
@@ -192,6 +192,11 @@
           "risks": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/FloodRisk" }
+          },
+          "reasoning": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "自然語言判定依據 — 解釋此分數是由哪些降雨情境、淹水深度、地勢條件推得。"
           },
           "disclaimer": { "type": "string" }
         }
@@ -211,7 +216,7 @@
       },
       "EarthquakeAssessment": {
         "type": "object",
-        "required": ["score", "level", "color", "fault", "liquefaction", "disclaimer"],
+        "required": ["score", "level", "color", "fault", "liquefaction", "history", "reasoning", "disclaimer"],
         "properties": {
           "score": { "type": "integer", "minimum": 0, "maximum": 100 },
           "level": { "type": "string", "enum": ["極低", "低", "中", "高", "極高"] },
@@ -250,7 +255,62 @@
               }
             }
           },
+          "history": { "$ref": "#/components/schemas/EarthquakeHistory" },
+          "reasoning": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "自然語言判定依據 — 解釋此分數是由斷層、液化、歷史地震佐證等哪些因素推得。"
+          },
           "disclaimer": { "type": "string" }
+        }
+      },
+      "EarthquakeHistory": {
+        "type": "object",
+        "required": ["available", "radius_km", "years_back", "events"],
+        "properties": {
+          "available": { "type": "boolean" },
+          "radius_km": { "type": "integer" },
+          "years_back": { "type": "integer" },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/EarthquakeHistoryEvent" }
+          }
+        }
+      },
+      "EarthquakeHistoryEvent": {
+        "type": "object",
+        "properties": {
+          "earthquake_no": { "type": "string" },
+          "origin_time": { "type": "string", "format": "date-time" },
+          "magnitude": { "type": "number" },
+          "depth_km": { "type": "number" },
+          "epicenter_lat": { "type": "number" },
+          "epicenter_lng": { "type": "number" },
+          "epicenter_distance_km": { "type": "number" },
+          "location_description": { "type": ["string", "null"] },
+          "source_url": { "type": ["string", "null"], "format": "uri" },
+          "estimated_intensity": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": ["level", "method", "nearest_station"],
+                "properties": {
+                  "level": { "type": "string" },
+                  "method": { "type": "string", "enum": ["nearest_station"] },
+                  "nearest_station": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "county": { "type": ["string", "null"] },
+                      "distance_km": { "type": "number" },
+                      "pga_gal": { "type": ["number", "null"] }
+                    }
+                  }
+                }
+              }
+            ]
+          }
         }
       },
       "HealthResponse": {

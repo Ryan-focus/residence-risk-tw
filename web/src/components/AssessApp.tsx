@@ -6,7 +6,12 @@ import { useAssess } from "@/hooks/useAssess";
 import ConsentModal from "@/components/ConsentModal";
 import AddressSearch from "@/components/AddressSearch";
 import ResultCard from "@/components/ResultCard";
-import { FloodDetails, EarthquakeDetails } from "@/components/RiskDetails";
+import {
+  FloodDetails,
+  EarthquakeDetails,
+  EarthquakeHistoryCard,
+  ReasoningList,
+} from "@/components/RiskDetails";
 import ResponseMeta from "@/components/ResponseMeta";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
@@ -63,13 +68,25 @@ export default function AssessApp() {
             />
           )}
 
+          <ReasoningList
+            title="為何被判為這個淹水分數？"
+            reasoning={data.flood.reasoning}
+          />
+
           <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-gray-700">淹水細節</h2>
+            <h3 className="text-sm font-semibold text-gray-700">淹水細節</h3>
             <FloodDetails risks={data.flood.risks} />
           </section>
 
+          <ReasoningList
+            title="為何被判為這個地震分數？"
+            reasoning={data.earthquake.reasoning}
+          />
+
+          <EarthquakeHistoryCard history={data.earthquake.history} />
+
           <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-gray-700">地震細節</h2>
+            <h3 className="text-sm font-semibold text-gray-700">地震細節</h3>
             <EarthquakeDetails earthquake={data.earthquake} />
           </section>
 

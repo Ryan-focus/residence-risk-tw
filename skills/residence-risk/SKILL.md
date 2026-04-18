@@ -66,15 +66,42 @@ Client config example:
 {
   "address": "台北市信義區信義路五段7號",
   "location": { "lat": 25.033, "lng": 121.567, "source": "nominatim", "display_name": "..." },
-  "flood":      { "score": 95, "level": "極高", "color": "#ef4444", "risks": [...], "disclaimer": "..." },
-  "earthquake": { "score": 86, "level": "極高", "color": "#ef4444",
-                  "fault":        { "score": 90, "risks": [...] },
-                  "liquefaction": { "score": 80, "has_data": true, "risks": [...] },
-                  "disclaimer": "..." },
+  "flood": {
+    "score": 95, "level": "極高", "color": "#ef4444",
+    "risks": [...],
+    "reasoning": ["綜合判定：**極高**風險...", "此地點在 24h 350mm 即會淹水..."],
+    "disclaimer": "..."
+  },
+  "earthquake": {
+    "score": 86, "level": "極高", "color": "#ef4444",
+    "fault":        { "score": 90, "risks": [...] },
+    "liquefaction": { "score": 80, "has_data": true, "risks": [...] },
+    "history": {
+      "available": true, "radius_km": 50, "years_back": 10,
+      "events": [{
+        "earthquake_no": "2022137",
+        "origin_time": "2022-09-18T06:44:15Z",
+        "magnitude": 6.8, "depth_km": 7.0,
+        "epicenter_distance_km": 42.3,
+        "location_description": "台東縣政府北方44.7公里",
+        "estimated_intensity": {
+          "level": "6強", "method": "nearest_station",
+          "nearest_station": { "name": "池上", "distance_km": 3.2, "pga_gal": 420.1 }
+        }
+      }]
+    },
+    "reasoning": ["綜合判定：**極高**風險...", "**斷層：位於第一類活動斷層...**", "**液化：...**", "**歷史地震佐證：...**"],
+    "disclaimer": "..."
+  },
   "meta": { "response_ms": 1351, "api_version": "0.2.0" },
   "disclaimer": "..."
 }
 ```
+
+Key fields for agents:
+- `flood.reasoning` / `earthquake.reasoning` are arrays of natural-language explanations (contain `**bold**` markdown). **Always present these to the user** — they are the "why" behind the score.
+- `earthquake.history.events[].estimated_intensity` uses **Method A: nearest-station measured intensity** (CWB station within 15 km of the address). `null` when no station is close enough — don't extrapolate.
+- `earthquake.history.available === false` means the administrator has not yet imported CWB historical data; respond with "此功能暫不可用" or similar.
 
 ## Scoring reference
 

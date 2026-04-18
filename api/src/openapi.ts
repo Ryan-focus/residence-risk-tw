@@ -140,12 +140,17 @@ export function buildOpenApiSpec(requestUrl: URL): unknown {
 				},
 				FloodAssessment: {
 					type: 'object',
-					required: ['score', 'level', 'color', 'risks', 'disclaimer'],
+					required: ['score', 'level', 'color', 'risks', 'reasoning', 'disclaimer'],
 					properties: {
 						score: { type: 'integer', minimum: 0, maximum: 100 },
 						level: { type: 'string', enum: ['極低', '低', '中', '高', '極高'] },
 						color: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
 						risks: { type: 'array', items: { $ref: '#/components/schemas/FloodRisk' } },
+						reasoning: {
+							type: 'array',
+							items: { type: 'string' },
+							description: '自然語言判定依據 — 解釋此分數是由哪些降雨情境、淹水深度、地勢條件推得。',
+						},
 						disclaimer: { type: 'string' },
 					},
 				},
@@ -161,7 +166,7 @@ export function buildOpenApiSpec(requestUrl: URL): unknown {
 				},
 				EarthquakeAssessment: {
 					type: 'object',
-					required: ['score', 'level', 'color', 'fault', 'liquefaction', 'disclaimer'],
+					required: ['score', 'level', 'color', 'fault', 'liquefaction', 'history', 'reasoning', 'disclaimer'],
 					properties: {
 						score: { type: 'integer', minimum: 0, maximum: 100 },
 						level: { type: 'string', enum: ['極低', '低', '中', '高', '極高'] },
@@ -200,7 +205,65 @@ export function buildOpenApiSpec(requestUrl: URL): unknown {
 								},
 							},
 						},
+						history: { $ref: '#/components/schemas/EarthquakeHistory' },
+						reasoning: {
+							type: 'array',
+							items: { type: 'string' },
+							description: '自然語言判定依據 — 解釋此分數是由斷層、液化、歷史地震佐證等哪些因素推得。',
+						},
 						disclaimer: { type: 'string' },
+					},
+				},
+				EarthquakeHistory: {
+					type: 'object',
+					required: ['available', 'radius_km', 'years_back', 'events'],
+					properties: {
+						available: {
+							type: 'boolean',
+							description: '是否已匯入歷史地震資料。false = 管理員尚未執行 import_earthquake_history.py。',
+						},
+						radius_km: { type: 'integer', description: '搜尋半徑（震央到查詢點）' },
+						years_back: { type: 'integer', description: '回溯年數' },
+						events: {
+							type: 'array',
+							items: { $ref: '#/components/schemas/EarthquakeHistoryEvent' },
+						},
+					},
+				},
+				EarthquakeHistoryEvent: {
+					type: 'object',
+					properties: {
+						earthquake_no: { type: 'string', description: 'CWB 地震編號' },
+						origin_time: { type: 'string', format: 'date-time' },
+						magnitude: { type: 'number', description: '芮氏規模 ML' },
+						depth_km: { type: 'number' },
+						epicenter_lat: { type: 'number' },
+						epicenter_lng: { type: 'number' },
+						epicenter_distance_km: { type: 'number', description: '震央距查詢點的大圓距離' },
+						location_description: { type: ['string', 'null'] },
+						source_url: { type: ['string', 'null'], format: 'uri' },
+						estimated_intensity: {
+							oneOf: [
+								{ type: 'null' },
+								{
+									type: 'object',
+									required: ['level', 'method', 'nearest_station'],
+									properties: {
+										level: { type: 'string', description: "CWB 震度等級：'0'..'4','5弱','5強','6弱','6強','7'" },
+										method: { type: 'string', enum: ['nearest_station'] },
+										nearest_station: {
+											type: 'object',
+											properties: {
+												name: { type: 'string' },
+												county: { type: ['string', 'null'] },
+												distance_km: { type: 'number' },
+												pga_gal: { type: ['number', 'null'] },
+											},
+										},
+									},
+								},
+							],
+						},
 					},
 				},
 				HealthResponse: {

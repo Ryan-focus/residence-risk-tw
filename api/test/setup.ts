@@ -86,6 +86,30 @@ const TABLES = [
 		data_version TEXT NOT NULL,
 		imported_at TEXT NOT NULL DEFAULT (datetime('now'))
 	)`,
+	`CREATE TABLE IF NOT EXISTS rrw_earthquake_history (
+		earthquake_no TEXT PRIMARY KEY,
+		origin_time TEXT NOT NULL,
+		magnitude REAL NOT NULL,
+		depth_km REAL NOT NULL,
+		epicenter_lat REAL NOT NULL,
+		epicenter_lng REAL NOT NULL,
+		location_description TEXT,
+		source_url TEXT,
+		data_source_id INTEGER REFERENCES rrw_data_sources(id),
+		data_version TEXT NOT NULL,
+		imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS rrw_earthquake_intensity (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		earthquake_no TEXT NOT NULL,
+		station_code TEXT,
+		station_name TEXT NOT NULL,
+		county TEXT,
+		station_lat REAL NOT NULL,
+		station_lng REAL NOT NULL,
+		pga_gal REAL,
+		intensity_level TEXT NOT NULL
+	)`,
 ];
 
 beforeAll(async () => {

@@ -306,4 +306,183 @@ describe('assessEarthquake', () => {
 		expect(result.fault.risks[0].distance_m).toBeLessThan(600);
 		expect(result.fault.score).toBe(25);
 	});
+
+	it('returns reasoning array explaining the score', async () => {
+		await seedFault({
+			name: '車籠埔斷層',
+			class_: 1,
+			bboxMinLat: TEST_LAT - 0.002,
+			bboxMinLng: TEST_LNG - 0.002,
+			bboxMaxLat: TEST_LAT + 0.002,
+			bboxMaxLng: TEST_LNG + 0.002,
+			centerLat: TEST_LAT,
+			centerLng: TEST_LNG,
+		});
+		const result = await assessEarthquake(env.DB, TEST_LAT, TEST_LNG);
+		expect(result.reasoning).toBeInstanceOf(Array);
+		expect(result.reasoning.length).toBeGreaterThan(0);
+		expect(result.reasoning.join('\n')).toContain('車籠埔斷層');
+		expect(result.reasoning.join('\n')).toContain('第一類');
+	});
+});
+
+describe('earthquake history (Method A: nearest station)', () => {
+	beforeEach(async () => {
+		await env.DB.batch([
+			env.DB.prepare('DELETE FROM rrw_earthquake_intensity'),
+			env.DB.prepare('DELETE FROM rrw_earthquake_history'),
+		]);
+	});
+
+	const ADDR_LAT = 23.70;
+	const ADDR_LNG = 120.45;
+
+	async function seedHistoryEvent(opts: {
+		no: string;
+		originTime: string;
+		magnitude: number;
+		depth: number;
+		epiLat: number;
+		epiLng: number;
+		description?: string;
+	}) {
+		await env.DB.prepare(
+			`INSERT INTO rrw_earthquake_history
+			 (earthquake_no, origin_time, magnitude, depth_km, epicenter_lat, epicenter_lng,
+			  location_description, source_url, data_version)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, '2026-04')`,
+		)
+			.bind(opts.no, opts.originTime, opts.magnitude, opts.depth, opts.epiLat, opts.epiLng, opts.description ?? null)
+			.run();
+	}
+
+	async function seedStation(opts: {
+		no: string;
+		name: string;
+		lat: number;
+		lng: number;
+		intensity: string;
+		pga?: number;
+		county?: string;
+	}) {
+		await env.DB.prepare(
+			`INSERT INTO rrw_earthquake_intensity
+			 (earthquake_no, station_code, station_name, county, station_lat, station_lng, pga_gal, intensity_level)
+			 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
+		)
+			.bind(opts.no, opts.name, opts.county ?? null, opts.lat, opts.lng, opts.pga ?? null, opts.intensity)
+			.run();
+	}
+
+	it('reports history.available=false when table is empty', async () => {
+		const result = await assessEarthquake(env.DB, ADDR_LAT, ADDR_LNG);
+		expect(result.history.available).toBe(false);
+		expect(result.history.events).toEqual([]);
+	});
+
+	it('reports empty events when populated but no nearby earthquake', async () => {
+		// 震央 >50km 外（東部外海）
+		await seedHistoryEvent({
+			no: 'EQ_FAR',
+			originTime: new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString(),
+			magnitude: 6.5,
+			depth: 10,
+			epiLat: 24.5,
+			epiLng: 122.0, // 距本地 ~160km
+		});
+		const result = await assessEarthquake(env.DB, ADDR_LAT, ADDR_LNG);
+		expect(result.history.available).toBe(true);
+		expect(result.history.events).toEqual([]);
+	});
+
+	it('picks nearest station and exposes intensity when within 15 km', async () => {
+		await seedHistoryEvent({
+			no: 'EQ_NEAR',
+			originTime: new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString(),
+			magnitude: 6.0,
+			depth: 15,
+			epiLat: ADDR_LAT + 0.2,
+			epiLng: ADDR_LNG + 0.2,
+			description: '測試地震',
+		});
+		// 兩個站：近的 3 km 震度 5弱，遠的 20 km 震度 4
+		await seedStation({
+			no: 'EQ_NEAR',
+			name: '近站',
+			lat: ADDR_LAT + 0.025, // ~2.8 km 北
+			lng: ADDR_LNG,
+			intensity: '5弱',
+			pga: 85.0,
+			county: '雲林縣',
+		});
+		await seedStation({
+			no: 'EQ_NEAR',
+			name: '遠站',
+			lat: ADDR_LAT + 0.18, // ~20 km 北
+			lng: ADDR_LNG,
+			intensity: '4',
+			pga: 40.0,
+		});
+
+		const result = await assessEarthquake(env.DB, ADDR_LAT, ADDR_LNG);
+		expect(result.history.events.length).toBe(1);
+		const ev = result.history.events[0];
+		expect(ev.earthquake_no).toBe('EQ_NEAR');
+		expect(ev.magnitude).toBe(6.0);
+		expect(ev.estimated_intensity).not.toBeNull();
+		expect(ev.estimated_intensity!.level).toBe('5弱');
+		expect(ev.estimated_intensity!.nearest_station.name).toBe('近站');
+		expect(ev.estimated_intensity!.nearest_station.distance_km).toBeLessThan(5);
+		expect(ev.estimated_intensity!.nearest_station.pga_gal).toBe(85.0);
+	});
+
+	it('returns null estimated_intensity when nearest station > 15 km', async () => {
+		await seedHistoryEvent({
+			no: 'EQ_NOST',
+			originTime: new Date(Date.now() - 60 * 24 * 3600 * 1000).toISOString(),
+			magnitude: 5.5,
+			depth: 20,
+			epiLat: ADDR_LAT + 0.1,
+			epiLng: ADDR_LNG + 0.1,
+		});
+		// 只有一個遠站 (~30 km)
+		await seedStation({
+			no: 'EQ_NOST',
+			name: '遠站',
+			lat: ADDR_LAT + 0.27,
+			lng: ADDR_LNG,
+			intensity: '3',
+		});
+
+		const result = await assessEarthquake(env.DB, ADDR_LAT, ADDR_LNG);
+		expect(result.history.events.length).toBe(1);
+		expect(result.history.events[0].estimated_intensity).toBeNull();
+	});
+
+	it('excludes earthquakes older than 10 years', async () => {
+		const oldTime = new Date();
+		oldTime.setFullYear(oldTime.getFullYear() - 11);
+		await seedHistoryEvent({
+			no: 'EQ_OLD',
+			originTime: oldTime.toISOString(),
+			magnitude: 7.0,
+			depth: 10,
+			epiLat: ADDR_LAT + 0.05,
+			epiLng: ADDR_LNG + 0.05,
+		});
+		const result = await assessEarthquake(env.DB, ADDR_LAT, ADDR_LNG);
+		expect(result.history.available).toBe(true); // table has data
+		expect(result.history.events).toEqual([]);
+	});
+});
+
+describe('assessFlood reasoning', () => {
+	it('gives a "safe" reasoning when no flood risks found', async () => {
+		await env.DB.prepare('DELETE FROM rrw_flood_zones').run();
+		const { assessFlood } = await import('../src/flood');
+		const result = await assessFlood(env.DB, 23.5, 120.5);
+		expect(result.reasoning).toBeInstanceOf(Array);
+		expect(result.reasoning.length).toBeGreaterThan(0);
+		expect(result.reasoning.join('\n')).toContain('極低');
+	});
 });

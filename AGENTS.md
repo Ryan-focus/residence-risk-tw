@@ -66,6 +66,25 @@ Point an Action at `https://residence-risk-web.pages.dev/openapi.json`. Auth: no
 
 - Use `npm run test` inside `api/` (vitest + workers pool) before committing API changes.
 - Use `npm run build` inside `web/` to validate the static export.
-- Never commit real MAP8 API keys; dev config in `api/wrangler.jsonc` uses an empty string.
+- Never commit real MAP8 or CWB API keys; dev config in `api/wrangler.jsonc` uses an empty string.
 - Do not remove the disclaimer strings or bypass the 4 KB / 200 char guards.
 - When adding a new risk dimension, update: D1 schema, import script, API module, OpenAPI spec (`api/src/openapi.ts` + `web/public/openapi.json`), `llms-full.txt`, and scoring table in `README.md`.
+- Reasoning strings (`flood.reasoning`, `earthquake.reasoning`) use a tiny `**bold**` markdown subset. When extending, keep each bullet self-contained and under ~120 chars.
+
+## Earthquake history (CWB E-A0015)
+
+Method A: nearest-station measured intensity. At query time we find CWB seismic stations within 15 km of the address and use the closest station's recorded intensity as the presumed felt intensity. If none within 15 km, intensity is reported as `null` (we don't extrapolate).
+
+To populate:
+
+```bash
+cd data-pipeline
+export CWB_API_KEY=...  # register free at opendata.cwa.gov.tw
+python scripts/import_earthquake_history.py \
+    --output processed/earthquake/earthquake_history_import.sql \
+    --limit 200
+
+cd ../api
+wrangler d1 execute rrw-db --remote \
+    --file=../data-pipeline/processed/earthquake/earthquake_history_import.sql
+```

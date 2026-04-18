@@ -11,6 +11,7 @@ export interface FloodAssessment {
   level: string;
   color: string;
   risks: FloodRisk[];
+  reasoning: string[];
   disclaimer: string;
 }
 
@@ -23,6 +24,35 @@ export interface FaultRisk {
 export interface LiquefactionRisk {
   level: "高" | "中" | "低";
   distance_m: number | null;
+}
+
+export interface EarthquakeHistoryEvent {
+  earthquake_no: string;
+  origin_time: string;
+  magnitude: number;
+  depth_km: number;
+  epicenter_lat: number;
+  epicenter_lng: number;
+  epicenter_distance_km: number;
+  location_description: string | null;
+  source_url: string | null;
+  estimated_intensity: {
+    level: string;
+    method: "nearest_station";
+    nearest_station: {
+      name: string;
+      county: string | null;
+      distance_km: number;
+      pga_gal: number | null;
+    };
+  } | null;
+}
+
+export interface EarthquakeHistory {
+  available: boolean;
+  radius_km: number;
+  years_back: number;
+  events: EarthquakeHistoryEvent[];
 }
 
 export interface EarthquakeAssessment {
@@ -38,6 +68,8 @@ export interface EarthquakeAssessment {
     has_data: boolean;
     risks: LiquefactionRisk[];
   };
+  history: EarthquakeHistory;
+  reasoning: string[];
   disclaimer: string;
 }
 
