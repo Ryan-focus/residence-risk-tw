@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/copy-leaflet-assets.mjs",
     "build": "next build",
+    "postinstall": "node scripts/copy-leaflet-assets.mjs || true",
     "start": "next start",
     "lint": "next lint"
   },

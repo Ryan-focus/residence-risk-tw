@@ -1,0 +1,26 @@
+# Residence Risk TW
+
+> 免費開源的台灣住址風險評估工具 — 輸入地址即可查詢淹水（24h 350/500/650mm 情境）與地震（活動斷層、土壤液化）風險，資料來源為台灣政府公開平台。本工具僅供防災參考，不構成土地使用、不動產交易、保險核保之依據。
+
+## 核心資源
+
+- [主站](https://residence-risk-web.pages.dev/)：Web UI（zh-Hant-TW），輸入地址直接查詢
+- [API 端點](https://residence-risk-api.workers.dev/v1/assess)：POST /v1/assess，接受 `{ "address": "台北市信義區..." }`，回傳 0-100 分風險評估
+- [OpenAPI 3.1 規格](https://residence-risk-web.pages.dev/openapi.json)：完整 REST API 規格，可直接餵給 agent 框架
+- [AI Plugin 描述](https://residence-risk-web.pages.dev/.well-known/ai-plugin.json)
+- [llms-full.txt](https://residence-risk-web.pages.dev/llms-full.txt)：本檔的完整版，含所有 endpoints、scoring rules、資料來源
+
+## 原始碼與文件
+
+- [GitHub: Ryan-focus/residence-risk-tw](https://github.com/Ryan-focus/residence-risk-tw)：AGPL-3.0，MIT data pipeline
+- [README](https://github.com/Ryan-focus/residence-risk-tw/blob/main/README.md)：完整安裝、部署、API 說明
+
+## 資料來源
+
+- [淹水潛勢圖 - 經濟部水利署](https://data.gov.tw/dataset/25766)
+- [活動斷層地質敏感區 - 中央地質調查所](https://data.gov.tw/dataset/100220)
+- [土壤液化潛勢圖 - 經濟部地質調查及礦業管理中心](https://data.gov.tw/dataset/28691)
+
+## 給 Agent 開發者
+
+此專案適合被整合到：房產查詢 bot、保險諮詢 agent、防災助理、搬家輔助工具。呼叫 `POST /v1/assess` 即可取得結構化風險分數。免費、無需 API key（公開版），僅限台灣地址。

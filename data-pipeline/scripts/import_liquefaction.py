@@ -47,6 +47,33 @@ def normalize_tw(s: str) -> str:
     return str(s).replace("臺", "台").strip()
 
 
+# Cloudflare D1 remote 單一 statement 上限 **100 KB**（local SQLite 是 ~1 MB）。
+# 留 20 KB 給 INSERT 其他欄位 → geojson 留 80 KB 上限；
+# 超過就加重 simplify；仍超過則回 None（Worker 端退回「距 centroid <100m」嚴格模式）。
+_GEOJSON_MAX_CHARS = 80_000
+_SIMPLIFY_TOLERANCES = (0.0001, 0.0003, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02)
+
+
+def _build_safe_geojson(geom) -> str | None:
+    for tol in _SIMPLIFY_TOLERANCES:
+        try:
+            simplified = geom.simplify(tol, preserve_topology=True)
+            if simplified is None or simplified.is_empty:
+                continue
+            s = json.dumps(mapping(simplified), ensure_ascii=False, separators=(",", ":"))
+            if len(s) <= _GEOJSON_MAX_CHARS:
+                return s
+        except Exception:
+            continue
+    # 放棄 — 讓 API 走 centroid-fallback 模式（bbox 粗篩 + <100m 距離）
+    print(
+        f"  [WARN] polygon geojson even at 0.005° tolerance exceeds {_GEOJSON_MAX_CHARS} chars; "
+        f"storing geojson=NULL (fallback to centroid distance)",
+        file=sys.stderr,
+    )
+    return None
+
+
 # 液化等級正規化
 LP_MAP: dict[str, str] = {
     "高": "高", "H": "高", "HIGH": "高", "3": "高",
@@ -150,17 +177,20 @@ def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
             stats["skipped"] += 1
             continue
 
-        # geojson 欄位 API 未讀取 — 為避免 D1 statement 過長，先不存
         def esc(s: str) -> str:
             return s.replace("'", "''")
+
+        geojson_str = _build_safe_geojson(row.geometry)
+        geojson_val = f"'{esc(geojson_str)}'" if geojson_str else "NULL"
 
         stmt = (
             f"INSERT OR IGNORE INTO rrw_liquefaction_zones "
             f"(level,county,district,bbox_min_lat,bbox_min_lng,bbox_max_lat,bbox_max_lng,"
-            f"center_lat,center_lng,data_version) VALUES ("
+            f"center_lat,center_lng,geojson,data_version) VALUES ("
             f"'{level}','{esc(county)}','{esc(district)}',"
             f"{round(bounds[1],7)},{round(bounds[0],7)},{round(bounds[3],7)},{round(bounds[2],7)},"
             f"{round(centroid.y,7)},{round(centroid.x,7)},"
+            f"{geojson_val},"
             f"'{datetime.now().strftime('%Y-%m')}');"
         )
         batch.append(stmt)

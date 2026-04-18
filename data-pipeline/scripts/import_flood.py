@@ -88,6 +88,24 @@ SCENARIO_PATTERNS = [
 # MVP 聚焦 24 小時三種情境
 MVP_SCENARIOS = {(24, 350), (24, 500), (24, 650)}
 
+# Cloudflare D1 remote per-statement 上限 **100 KB**；geojson 留 80 KB 緩衝
+_GEOJSON_MAX_CHARS = 80_000
+_SIMPLIFY_TOLERANCES = (0.00005, 0.0001, 0.0003, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02)
+
+
+def _build_safe_flood_geojson(geom) -> str | None:
+    for tol in _SIMPLIFY_TOLERANCES:
+        try:
+            s_geom = geom.simplify(tolerance=tol, preserve_topology=True)
+            if s_geom is None or s_geom.is_empty:
+                continue
+            s = json.dumps(s_geom.__geo_interface__, separators=(",", ":"), ensure_ascii=False)
+            if len(s) <= _GEOJSON_MAX_CHARS:
+                return s
+        except Exception:
+            continue
+    return None
+
 # type 欄位 → 標準深度分類
 def normalize_depth(type_val: str) -> str:
     """將 SHP 的 type 欄位轉為標準深度分類"""
@@ -147,6 +165,10 @@ def process_county_dir(
         if gdf.crs and gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
 
+        # 關鍵：把 MultiPolygon 拆成個別 Polygon，否則整個縣市合為一筆、
+        # bbox 會橫跨數十公里，Worker 端 fallback 無法判斷具體位置是否在淹水區。
+        gdf = gdf.explode(index_parts=False, ignore_index=True)
+
         count = 0
         for _, row in gdf.iterrows():
             geom = row.geometry
@@ -156,6 +178,12 @@ def process_county_dir(
             bounds = geom.bounds  # (minx, miny, maxx, maxy) = (min_lng, min_lat, max_lng, max_lat)
             centroid = geom.centroid
             depth_class = normalize_depth(row.get("type", "unknown"))
+
+            # 儲存完整 polygon 供 Worker 做真正 point-in-polygon 判定。
+            # 有些淹水區（沿海平原或整條河川流域）polygon 非常大，單一 INSERT
+            # 可能撞到 D1/SQLite 的 ~1MB 語句上限；漸進加重 simplify，
+            # 仍超出就回 None（Worker 走 centroid-fallback 模式）。
+            geojson_str = _build_safe_flood_geojson(geom)
 
             records.append({
                 "rainfall_scenario": scenario,
@@ -169,12 +197,17 @@ def process_county_dir(
                 "bbox_max_lng": round(bounds[2], 7),
                 "center_lat": round(centroid.y, 7),
                 "center_lng": round(centroid.x, 7),
+                "geojson": geojson_str,
             })
             count += 1
 
         print(f"{count} 筆")
 
     return county, records
+
+
+def _sql_escape(s: str) -> str:
+    return s.replace("'", "''")
 
 
 def export_to_sql(records: List[Dict[str, Any]], output_path: Path, data_version: str) -> None:
@@ -184,6 +217,9 @@ def export_to_sql(records: List[Dict[str, Any]], output_path: Path, data_version
         f.write(f"-- 產生時間: {datetime.now(timezone.utc).isoformat()}\n")
         f.write(f"-- 資料版本: {data_version}\n")
         f.write(f"-- 筆數: {len(records)}\n\n")
+
+        # 先清掉舊資料（同一 data_version 重複匯入時保持冪等）
+        f.write("DELETE FROM rrw_flood_zones;\n\n")
 
         # 資料源記錄
         now = datetime.now(timezone.utc).isoformat()
@@ -196,24 +232,21 @@ def export_to_sql(records: List[Dict[str, Any]], output_path: Path, data_version
             f"'資料來源：經濟部水利署淹水潛勢圖。依《水災潛勢資料公開辦法》，此資料僅供防災業務參考。');\n\n"
         )
 
-        # 淹水區記錄（批次 INSERT）
-        batch_size = 50
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
+        # 淹水區記錄 — 每筆一條 INSERT（geojson 字串可能很長，不適合多值 INSERT）
+        for rec in records:
+            geojson_val = (
+                f"'{_sql_escape(rec['geojson'])}'" if rec.get("geojson") else "NULL"
+            )
             f.write(
                 "INSERT INTO rrw_flood_zones (rainfall_scenario, duration_hours, rainfall_mm, "
                 "depth_class, county, bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, "
-                "center_lat, center_lng, data_version) VALUES\n"
+                "center_lat, center_lng, geojson, data_version) VALUES ("
+                f"'{rec['rainfall_scenario']}', {rec['duration_hours']}, {rec['rainfall_mm']}, "
+                f"'{rec['depth_class']}', '{_sql_escape(rec['county'])}', "
+                f"{rec['bbox_min_lat']}, {rec['bbox_min_lng']}, {rec['bbox_max_lat']}, {rec['bbox_max_lng']}, "
+                f"{rec['center_lat']}, {rec['center_lng']}, {geojson_val}, '{data_version}');\n"
             )
-            values = []
-            for rec in batch:
-                values.append(
-                    f"  ('{rec['rainfall_scenario']}', {rec['duration_hours']}, {rec['rainfall_mm']}, "
-                    f"'{rec['depth_class']}', '{rec['county']}', "
-                    f"{rec['bbox_min_lat']}, {rec['bbox_min_lng']}, {rec['bbox_max_lat']}, {rec['bbox_max_lng']}, "
-                    f"{rec['center_lat']}, {rec['center_lng']}, '{data_version}')"
-                )
-            f.write(",\n".join(values) + ";\n\n")
+        f.write("\n")
 
     print(f"\n已匯出: {output_path}")
     print(f"  筆數: {len(records)}")

@@ -87,6 +87,25 @@ cd ../../api
 wrangler d1 execute rrw-db --local --file=../data-pipeline/processed/flood/flood_import.sql
 ```
 
+### 3c. 匯入歷史地震（CWB 顯著有感地震報告）
+
+歷史地震用於「近 10 年震央 50 km 內」的背景資訊顯示與 `earthquake.reasoning` 佐證。震度推定採 **Method A：最近測站實測**（最近 CWB 測站距查詢點 >15 km 時不推定）。
+
+```bash
+cd data-pipeline
+export CWB_API_KEY=YOUR_KEY   # 免費申請：https://opendata.cwa.gov.tw/
+
+python scripts/import_earthquake_history.py \
+    --output processed/earthquake/earthquake_history_import.sql \
+    --limit 200
+
+cd ../api
+wrangler d1 execute rrw-db --local \
+    --file=../data-pipeline/processed/earthquake/earthquake_history_import.sql
+```
+
+> 若不匯入此資料，`earthquake.history.available` 會回 `false`，前端自動顯示「尚未匯入歷史地震資料」提示，其他評分不受影響。
+
 ### 3b. 匯入地震資料（活動斷層 + 土壤液化）
 
 ```bash
@@ -235,6 +254,18 @@ wrangler pages deploy out --project-name your-project
 | 404 | `ADDRESS_NOT_FOUND` | 地理編碼找不到對應位置 |
 | 413 | `PAYLOAD_TOO_LARGE` | 請求內容超過 4KB |
 | 500 | `INTERNAL_ERROR` | 伺服器內部錯誤 |
+
+### AI / Agent 友善端點
+
+| 路徑 | 內容 |
+|------|------|
+| `GET /v1/openapi.json` | OpenAPI 3.1 規格（同步鏡像至前端 `/openapi.json`） |
+| `GET /.well-known/ai-plugin.json` | ChatGPT Action / Claude plugin 描述 |
+| `GET /.well-known/mcp.json` | MCP server descriptor |
+| `GET/POST /mcp` | MCP (JSON-RPC 2.0) streamable-HTTP 端點，暴露 `assess_residence_risk` 工具 |
+| `GET /llms.txt` | LLM 索引（API 端） |
+
+前端另外提供 `/llms.txt`、`/llms-full.txt`、`/robots.txt`、`/sitemap.xml`、`/opengraph-image`。詳見 [`AGENTS.md`](AGENTS.md) 與 [`skills/residence-risk/SKILL.md`](skills/residence-risk/SKILL.md)。
 
 ## 專案結構
 

@@ -199,10 +199,11 @@ def process_shp(path: Path, out_f: io.TextIOWrapper, stats: dict, default_class:
         stmt = (
             f"INSERT OR IGNORE INTO rrw_fault_zones "
             f"(fault_name,fault_class,county,bbox_min_lat,bbox_min_lng,bbox_max_lat,bbox_max_lng,"
-            f"center_lat,center_lng,data_version) VALUES ("
+            f"center_lat,center_lng,geojson,data_version) VALUES ("
             f"'{esc(fault_name)}',{fault_class},'全台',"
             f"{bbox['min_lat']},{bbox['min_lng']},{bbox['max_lat']},{bbox['max_lng']},"
             f"{center_lat},{center_lng},"
+            f"'{esc(geojson_str)}',"
             f"'{datetime.now().strftime('%Y-%m')}');"
         )
         batch.append(stmt)
