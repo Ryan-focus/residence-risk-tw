@@ -9,6 +9,17 @@
 export type Ring = [number, number][]; // [lng, lat] pairs
 export type Polygon = Ring[]; // [outerRing, ...holes]
 
+/** Haversine 距離（公尺） */
+function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
+	const R = 6371000;
+	const dLat = ((lat2 - lat1) * Math.PI) / 180;
+	const dLng = ((lng2 - lng1) * Math.PI) / 180;
+	const a =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+	return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 /** 射線法：點是否落在單一 ring 內（不分外環內環，純多邊形判定） */
 export function pointInRing(lng: number, lat: number, ring: Ring): boolean {
 	let inside = false;
@@ -59,3 +70,37 @@ export function pointInGeoJSON(lat: number, lng: number, geojsonText: string | n
 		return false;
 	}
 }
+
+/**
+ * 無 geojson 可用時的退回判定（用 bbox + centroid 距離做適應性估算）。
+ *
+ * 策略：
+ *   1. 點必須先落在 bbox 內，否則直接 false。
+ *   2. 小 polygon（bbox 對角 < 500 m）→ 信任 bbox（polygon 幾乎 = bbox）。
+ *   3. 中 polygon（bbox 對角 < 2 km）→ 距 centroid 需 < 半對角。
+ *   4. 大 polygon（bbox 對角 >= 2 km）→ 距 centroid 需 < 500 m（避免超大 bbox 誤收山區）。
+ *
+ * 此 heuristic 介於「bbox-only（過寬）」與「<100m centroid（過嚴）」之間，
+ * 是 geojson 欄位尚未匯入時的最佳折衷。真正精準判定仍須 re-import 帶 geojson。
+ */
+export function insideBboxFallback(
+	lat: number,
+	lng: number,
+	bboxMinLat: number,
+	bboxMinLng: number,
+	bboxMaxLat: number,
+	bboxMaxLng: number,
+	centerLat: number,
+	centerLng: number,
+): boolean {
+	if (lat < bboxMinLat || lat > bboxMaxLat || lng < bboxMinLng || lng > bboxMaxLng) {
+		return false;
+	}
+	const bboxDiagM = haversineM(bboxMinLat, bboxMinLng, bboxMaxLat, bboxMaxLng);
+	const centroidDistM = haversineM(lat, lng, centerLat, centerLng);
+
+	if (bboxDiagM < 500) return true;
+	if (bboxDiagM < 2000) return centroidDistM < bboxDiagM / 2;
+	return centroidDistM < 500;
+}
+

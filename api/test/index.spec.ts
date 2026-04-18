@@ -596,23 +596,35 @@ describe('assessFlood insideness (bbox + geojson)', () => {
 		expect(flood.score).toBe(95); // 350mm + >50cm inside → 95
 	});
 
-	it('fallback: without geojson, only points <100m from centroid count as inside', async () => {
-		// 舊資料（geojson=null）：bbox 很大但 centroid 在 (23.725, 120.475)
+	it('fallback (no geojson): small bbox trusts bbox', async () => {
+		// 小 polygon bbox 對角 ~150m → 信任 bbox
+		await seedFloodZone({
+			bboxMinLat: 23.7000, bboxMinLng: 120.4500, bboxMaxLat: 23.7010, bboxMaxLng: 120.4510,
+			centerLat: 23.7005, centerLng: 120.4505,
+			geojson: null,
+			rainfall: 350, depth: '>50cm',
+		});
+		// bbox 角落也應被判 inside（小 polygon ≈ bbox）
+		const corner = await assessFlood(env.DB, 23.7001, 120.4501);
+		expect(corner.risks.find((r) => r.distance_m === null)).toBeDefined();
+		// bbox 外則否
+		const outside = await assessFlood(env.DB, 23.712, 120.462);
+		expect(outside.risks.find((r) => r.distance_m === null)).toBeUndefined();
+	});
+
+	it('fallback (no geojson): huge bbox requires <500m from centroid', async () => {
+		// 大 polygon（對角 >6km）→ 嚴格限制 500m
 		await seedFloodZone({
 			bboxMinLat: 23.70, bboxMinLng: 120.45, bboxMaxLat: 23.75, bboxMaxLng: 120.50,
 			centerLat: 23.725, centerLng: 120.475,
 			geojson: null,
 			rainfall: 350, depth: '>50cm',
 		});
-
-		// bbox 角落但距離 centroid >2km → 在舊模式下也不該被判 inside
-		const far = await assessFlood(env.DB, 23.749, 120.451);
-		const farInside = far.risks.find((r) => r.distance_m === null);
-		expect(farInside).toBeUndefined();
-
-		// 距 centroid ~50m → inside
+		// bbox 對角 ~6.8km，centroid ~50m → inside
 		const near = await assessFlood(env.DB, 23.7254, 120.4754);
-		const nearInside = near.risks.find((r) => r.distance_m === null);
-		expect(nearInside).toBeDefined();
+		expect(near.risks.find((r) => r.distance_m === null)).toBeDefined();
+		// bbox 左上角距 centroid >2km → NOT inside（避免山區誤收）
+		const corner = await assessFlood(env.DB, 23.749, 120.451);
+		expect(corner.risks.find((r) => r.distance_m === null)).toBeUndefined();
 	});
 });

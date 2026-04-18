@@ -11,7 +11,7 @@
  * v0.2 修正：用定量降雨情境（非重現期）。
  */
 
-import { pointInGeoJSON } from './geo';
+import { pointInGeoJSON, insideBboxFallback } from './geo';
 
 export interface FloodRisk {
 	scenario: string;
@@ -204,11 +204,20 @@ export async function assessFlood(db: D1Database, lat: number, lng: number): Pro
 		.map((row) => {
 			const centroidDistM = haversineM(lat, lng, row.center_lat, row.center_lng);
 
-			// Tier 1: 有 geojson → 真正 point-in-polygon
-			// Tier 2: 無 geojson → 要求距 centroid < 100m 才算 inside（避免大 bbox 誤判）
+			// Tier 1: 有 geojson → 真正 point-in-polygon（最精準）
+			// Tier 2: 無 geojson → 適應性 bbox + centroid 距離 fallback
 			const inside = row.geojson
 				? pointInGeoJSON(lat, lng, row.geojson)
-				: centroidDistM < 100;
+				: insideBboxFallback(
+						lat,
+						lng,
+						row.bbox_min_lat,
+						row.bbox_min_lng,
+						row.bbox_max_lat,
+						row.bbox_max_lng,
+						row.center_lat,
+						row.center_lng,
+					);
 
 			return {
 				scenario: row.rainfall_scenario,

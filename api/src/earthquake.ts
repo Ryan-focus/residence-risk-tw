@@ -72,7 +72,7 @@ export interface EarthquakeAssessment {
 	disclaimer: string;
 }
 
-import { pointInGeoJSON } from './geo';
+import { pointInGeoJSON, insideBboxFallback } from './geo';
 
 /** Haversine 距離（公尺） */
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -160,7 +160,18 @@ export async function assessEarthquake(
 
 	const faultRisks: FaultRisk[] = faultRows.map((r) => {
 		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
-		const inside = r.geojson ? pointInGeoJSON(lat, lng, r.geojson) : centroidDistM < 100;
+		const inside = r.geojson
+			? pointInGeoJSON(lat, lng, r.geojson)
+			: insideBboxFallback(
+					lat,
+					lng,
+					r.bbox_min_lat,
+					r.bbox_min_lng,
+					r.bbox_max_lat,
+					r.bbox_max_lng,
+					r.center_lat,
+					r.center_lng,
+				);
 		return {
 			fault_name: r.fault_name,
 			fault_class: r.fault_class as 1 | 2,
@@ -192,7 +203,18 @@ export async function assessEarthquake(
 
 	const liqRisks: LiquefactionRisk[] = liqRows.map((r) => {
 		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
-		const inside = r.geojson ? pointInGeoJSON(lat, lng, r.geojson) : centroidDistM < 100;
+		const inside = r.geojson
+			? pointInGeoJSON(lat, lng, r.geojson)
+			: insideBboxFallback(
+					lat,
+					lng,
+					r.bbox_min_lat,
+					r.bbox_min_lng,
+					r.bbox_max_lat,
+					r.bbox_max_lng,
+					r.center_lat,
+					r.center_lng,
+				);
 		return {
 			level: r.level as '高' | '中' | '低',
 			distance_m: inside ? null : Math.round(centroidDistM),
