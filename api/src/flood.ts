@@ -219,14 +219,26 @@ export async function assessFlood(db: D1Database, lat: number, lng: number): Pro
 
 	const geojsonMap = new Map<number, string | null>();
 	if (bboxHits.length > 0) {
-		// 限 30 個以控 CPU／回傳大小
-		const ids = bboxHits.slice(0, 30).map((r) => r.id);
+		// 最多 8 筆 geojson（8 × 80KB = 640KB，安全在 D1 1MB 單次回傳限制內）。
+		// 優先挑 bbox 最小的（最可能精準包含點），避免浪費額度在巨大 polygon。
+		const sorted = [...bboxHits].sort(
+			(a, b) =>
+				(a.bbox_max_lat - a.bbox_min_lat) * (a.bbox_max_lng - a.bbox_min_lng) -
+				(b.bbox_max_lat - b.bbox_min_lat) * (b.bbox_max_lng - b.bbox_min_lng),
+		);
+		const ids = sorted.slice(0, 8).map((r) => r.id);
 		const placeholders = ids.map(() => '?').join(',');
-		const { results: geoRows } = await db
-			.prepare(`SELECT id, geojson FROM rrw_flood_zones WHERE id IN (${placeholders})`)
-			.bind(...ids)
-			.all<{ id: number; geojson: string | null }>();
-		for (const g of geoRows) geojsonMap.set(g.id, g.geojson);
+		try {
+			const { results: geoRows } = await db
+				.prepare(`SELECT id, geojson FROM rrw_flood_zones WHERE id IN (${placeholders})`)
+				.bind(...ids)
+				.all<{ id: number; geojson: string | null }>();
+			for (const g of geoRows) geojsonMap.set(g.id, g.geojson);
+		} catch (err) {
+			// 單次 geojson 批次查詢失敗（如 response 過大）不致整個 request 爆：
+			// geojsonMap 保持空，後續 inside 判定會退回 bbox-adaptive fallback。
+			console.warn('flood geojson fetch failed, using bbox fallback:', err);
+		}
 	}
 
 	const risks: FloodRisk[] = candidates
