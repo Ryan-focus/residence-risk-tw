@@ -150,17 +150,29 @@ def process_file(path: Path, out_f: io.TextIOWrapper, stats: dict) -> None:
             stats["skipped"] += 1
             continue
 
-        # geojson 欄位 API 未讀取 — 為避免 D1 statement 過長，先不存
         def esc(s: str) -> str:
             return s.replace("'", "''")
+
+        # 保留 polygon 以便 Worker 做真正 point-in-polygon 判定
+        # 簡化容差 ~10m（0.0001 度）降低 D1 儲存成本
+        try:
+            simplified = row.geometry.simplify(0.0001, preserve_topology=True)
+            if simplified.is_empty:
+                simplified = row.geometry
+            geojson_str = json.dumps(mapping(simplified), ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            geojson_str = None
+
+        geojson_val = f"'{esc(geojson_str)}'" if geojson_str else "NULL"
 
         stmt = (
             f"INSERT OR IGNORE INTO rrw_liquefaction_zones "
             f"(level,county,district,bbox_min_lat,bbox_min_lng,bbox_max_lat,bbox_max_lng,"
-            f"center_lat,center_lng,data_version) VALUES ("
+            f"center_lat,center_lng,geojson,data_version) VALUES ("
             f"'{level}','{esc(county)}','{esc(district)}',"
             f"{round(bounds[1],7)},{round(bounds[0],7)},{round(bounds[3],7)},{round(bounds[2],7)},"
             f"{round(centroid.y,7)},{round(centroid.x,7)},"
+            f"{geojson_val},"
             f"'{datetime.now().strftime('%Y-%m')}');"
         )
         batch.append(stmt)

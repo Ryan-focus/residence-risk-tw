@@ -3,6 +3,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import worker from '../src/index';
 import { normalizeAddress } from '../src/geocode';
 import { assessEarthquake } from '../src/earthquake';
+import { assessFlood } from '../src/flood';
+import { pointInPolygon, pointInGeoJSON } from '../src/geo';
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
@@ -476,13 +478,141 @@ describe('earthquake history (Method A: nearest station)', () => {
 	});
 });
 
-describe('assessFlood reasoning', () => {
-	it('gives a "safe" reasoning when no flood risks found', async () => {
+describe('geo utilities', () => {
+	it('pointInPolygon: inside simple square', () => {
+		const square: [number, number][][] = [[
+			[0, 0], [2, 0], [2, 2], [0, 2], [0, 0],
+		]];
+		expect(pointInPolygon(1, 1, square)).toBe(true);
+		expect(pointInPolygon(3, 1, square)).toBe(false);
+	});
+
+	it('pointInPolygon: point inside donut hole is excluded', () => {
+		const donut: [number, number][][] = [
+			[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]],      // outer
+			[[4, 4], [6, 4], [6, 6], [4, 6], [4, 4]],           // hole
+		];
+		expect(pointInPolygon(1, 1, donut)).toBe(true); // inside outer, not in hole
+		expect(pointInPolygon(5, 5, donut)).toBe(false); // inside hole
+	});
+
+	it('pointInGeoJSON: elongated valley polygon excludes mountain bbox corner', () => {
+		// 細長河谷 polygon (lng/lat)，bbox 是 0..10 × 0..10 的大方形
+		// 但 polygon 只佔沿對角線的細帶
+		const valley = JSON.stringify({
+			type: 'Polygon',
+			coordinates: [[
+				[0, 0], [10, 10], [10.5, 9.5], [0.5, -0.5], [0, 0],
+			]],
+		});
+		// bbox 左上角（山）— 在 bbox 內但不在 polygon 內
+		expect(pointInGeoJSON(9.9, 0.1, valley)).toBe(false);
+		// polygon 中心
+		expect(pointInGeoJSON(5, 5, valley)).toBe(true);
+	});
+
+	it('pointInGeoJSON: MultiPolygon with two disjoint regions', () => {
+		const mp = JSON.stringify({
+			type: 'MultiPolygon',
+			coordinates: [
+				[[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+				[[[5, 5], [6, 5], [6, 6], [5, 6], [5, 5]]],
+			],
+		});
+		expect(pointInGeoJSON(0.5, 0.5, mp)).toBe(true);
+		expect(pointInGeoJSON(5.5, 5.5, mp)).toBe(true);
+		expect(pointInGeoJSON(3, 3, mp)).toBe(false); // gap between regions
+	});
+
+	it('pointInGeoJSON: returns false on invalid / empty input', () => {
+		expect(pointInGeoJSON(0, 0, null)).toBe(false);
+		expect(pointInGeoJSON(0, 0, '')).toBe(false);
+		expect(pointInGeoJSON(0, 0, '{not json')).toBe(false);
+		expect(pointInGeoJSON(0, 0, '{"type":"Point","coordinates":[0,0]}')).toBe(false);
+	});
+});
+
+describe('assessFlood insideness (bbox + geojson)', () => {
+	beforeEach(async () => {
 		await env.DB.prepare('DELETE FROM rrw_flood_zones').run();
-		const { assessFlood } = await import('../src/flood');
+	});
+
+	async function seedFloodZone(opts: {
+		bboxMinLat: number; bboxMinLng: number; bboxMaxLat: number; bboxMaxLng: number;
+		centerLat: number; centerLng: number;
+		geojson?: string | null;
+		rainfall?: number; depth?: string;
+	}) {
+		await env.DB.prepare(
+			`INSERT INTO rrw_flood_zones
+			 (rainfall_scenario, duration_hours, rainfall_mm, depth_class, county,
+			  bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng,
+			  center_lat, center_lng, geojson, data_version)
+			 VALUES (?, 24, ?, ?, '全台', ?, ?, ?, ?, ?, ?, ?, '2026-04')`,
+		)
+			.bind(
+				`24h_${opts.rainfall ?? 350}mm`,
+				opts.rainfall ?? 350,
+				opts.depth ?? '0-50cm',
+				opts.bboxMinLat, opts.bboxMinLng, opts.bboxMaxLat, opts.bboxMaxLng,
+				opts.centerLat, opts.centerLng,
+				opts.geojson ?? null,
+			)
+			.run();
+	}
+
+	it('returns "safe" reasoning when no zones', async () => {
 		const result = await assessFlood(env.DB, 23.5, 120.5);
-		expect(result.reasoning).toBeInstanceOf(Array);
-		expect(result.reasoning.length).toBeGreaterThan(0);
+		expect(result.score).toBe(5);
 		expect(result.reasoning.join('\n')).toContain('極低');
+	});
+
+	it('mountain bbox corner is NOT flagged as inside when geojson is set', async () => {
+		// 直角三角形淹水區：P1(120.45,23.70) P2(120.50,23.70) P3(120.50,23.75)
+		// 斜邊為 lat=23.70+(lng-120.45) — bbox 內 lat 大於此線的為 polygon 外（山上）
+		const triGeoJSON = JSON.stringify({
+			type: 'Polygon',
+			coordinates: [[
+				[120.45, 23.70], [120.50, 23.70], [120.50, 23.75], [120.45, 23.70],
+			]],
+		});
+		await seedFloodZone({
+			bboxMinLat: 23.70, bboxMinLng: 120.45, bboxMaxLat: 23.75, bboxMaxLng: 120.50,
+			centerLat: 23.72, centerLng: 120.48, // 在三角形內
+			geojson: triGeoJSON,
+			rainfall: 350, depth: '>50cm',
+		});
+
+		// 山點：bbox 左上角，在 bbox 內但斜邊之上 → polygon 外
+		const mountain = await assessFlood(env.DB, 23.749, 120.451);
+		const inside = mountain.risks.find((r) => r.distance_m === null);
+		expect(inside).toBeUndefined();
+		expect(mountain.score).toBeLessThan(95);
+
+		// 淹水區中心（三角形內）：應被判為 inside
+		const flood = await assessFlood(env.DB, 23.72, 120.48);
+		const floodInside = flood.risks.find((r) => r.distance_m === null);
+		expect(floodInside).toBeDefined();
+		expect(flood.score).toBe(95); // 350mm + >50cm inside → 95
+	});
+
+	it('fallback: without geojson, only points <100m from centroid count as inside', async () => {
+		// 舊資料（geojson=null）：bbox 很大但 centroid 在 (23.725, 120.475)
+		await seedFloodZone({
+			bboxMinLat: 23.70, bboxMinLng: 120.45, bboxMaxLat: 23.75, bboxMaxLng: 120.50,
+			centerLat: 23.725, centerLng: 120.475,
+			geojson: null,
+			rainfall: 350, depth: '>50cm',
+		});
+
+		// bbox 角落但距離 centroid >2km → 在舊模式下也不該被判 inside
+		const far = await assessFlood(env.DB, 23.749, 120.451);
+		const farInside = far.risks.find((r) => r.distance_m === null);
+		expect(farInside).toBeUndefined();
+
+		// 距 centroid ~50m → inside
+		const near = await assessFlood(env.DB, 23.7254, 120.4754);
+		const nearInside = near.risks.find((r) => r.distance_m === null);
+		expect(nearInside).toBeDefined();
 	});
 });

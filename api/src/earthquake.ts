@@ -72,6 +72,8 @@ export interface EarthquakeAssessment {
 	disclaimer: string;
 }
 
+import { pointInGeoJSON } from './geo';
+
 /** Haversine 距離（公尺） */
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
 	const R = 6371000;
@@ -137,7 +139,7 @@ export async function assessEarthquake(
 	const { results: faultRows } = await db
 		.prepare(
 			`SELECT fault_name, fault_class, center_lat, center_lng,
-			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng
+			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, geojson
 			 FROM rrw_fault_zones
 			 WHERE bbox_min_lat <= ?1 + ?3 AND bbox_max_lat >= ?1 - ?3
 			   AND bbox_min_lng <= ?2 + ?3 AND bbox_max_lng >= ?2 - ?3
@@ -153,16 +155,16 @@ export async function assessEarthquake(
 			bbox_min_lng: number;
 			bbox_max_lat: number;
 			bbox_max_lng: number;
+			geojson: string | null;
 		}>();
 
 	const faultRisks: FaultRisk[] = faultRows.map((r) => {
-		const inside =
-			lat >= r.bbox_min_lat && lat <= r.bbox_max_lat &&
-			lng >= r.bbox_min_lng && lng <= r.bbox_max_lng;
+		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
+		const inside = r.geojson ? pointInGeoJSON(lat, lng, r.geojson) : centroidDistM < 100;
 		return {
 			fault_name: r.fault_name,
 			fault_class: r.fault_class as 1 | 2,
-			distance_m: inside ? null : Math.round(haversineM(lat, lng, r.center_lat, r.center_lng)),
+			distance_m: inside ? null : Math.round(centroidDistM),
 		};
 	});
 
@@ -170,7 +172,7 @@ export async function assessEarthquake(
 	const { results: liqRows } = await db
 		.prepare(
 			`SELECT level, center_lat, center_lng,
-			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng
+			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, geojson
 			 FROM rrw_liquefaction_zones
 			 WHERE bbox_min_lat <= ?1 + ?3 AND bbox_max_lat >= ?1 - ?3
 			   AND bbox_min_lng <= ?2 + ?3 AND bbox_max_lng >= ?2 - ?3
@@ -185,15 +187,15 @@ export async function assessEarthquake(
 			bbox_min_lng: number;
 			bbox_max_lat: number;
 			bbox_max_lng: number;
+			geojson: string | null;
 		}>();
 
 	const liqRisks: LiquefactionRisk[] = liqRows.map((r) => {
-		const inside =
-			lat >= r.bbox_min_lat && lat <= r.bbox_max_lat &&
-			lng >= r.bbox_min_lng && lng <= r.bbox_max_lng;
+		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
+		const inside = r.geojson ? pointInGeoJSON(lat, lng, r.geojson) : centroidDistM < 100;
 		return {
 			level: r.level as '高' | '中' | '低',
-			distance_m: inside ? null : Math.round(haversineM(lat, lng, r.center_lat, r.center_lng)),
+			distance_m: inside ? null : Math.round(centroidDistM),
 		};
 	});
 
