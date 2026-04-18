@@ -47,11 +47,11 @@ def normalize_tw(s: str) -> str:
     return str(s).replace("臺", "台").strip()
 
 
-# D1 / SQLite 單一 INSERT 語句長度上限 ~1 MB。預留其他欄位空間，
-# geojson 字串設 400 KB 安全上限。超過就改用更粗的 simplify 容差重試，
-# 仍超過則回 None（Worker 端會退回「距 centroid <100m」嚴格模式）。
-_GEOJSON_MAX_CHARS = 400_000
-_SIMPLIFY_TOLERANCES = (0.0001, 0.0005, 0.001, 0.002, 0.005)
+# Cloudflare D1 remote 單一 statement 上限 **100 KB**（local SQLite 是 ~1 MB）。
+# 留 20 KB 給 INSERT 其他欄位 → geojson 留 80 KB 上限；
+# 超過就加重 simplify；仍超過則回 None（Worker 端退回「距 centroid <100m」嚴格模式）。
+_GEOJSON_MAX_CHARS = 80_000
+_SIMPLIFY_TOLERANCES = (0.0001, 0.0003, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02)
 
 
 def _build_safe_geojson(geom) -> str | None:

@@ -88,9 +88,9 @@ SCENARIO_PATTERNS = [
 # MVP 聚焦 24 小時三種情境
 MVP_SCENARIOS = {(24, 350), (24, 500), (24, 650)}
 
-# D1 / SQLite 單一 INSERT 語句 ~1 MB 上限；geojson 留 400 KB 緩衝
-_GEOJSON_MAX_CHARS = 400_000
-_SIMPLIFY_TOLERANCES = (0.00005, 0.0001, 0.0005, 0.001, 0.002, 0.005)
+# Cloudflare D1 remote per-statement 上限 **100 KB**；geojson 留 80 KB 緩衝
+_GEOJSON_MAX_CHARS = 80_000
+_SIMPLIFY_TOLERANCES = (0.00005, 0.0001, 0.0003, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02)
 
 
 def _build_safe_flood_geojson(geom) -> str | None:
