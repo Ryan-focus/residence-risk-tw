@@ -87,6 +87,73 @@ describe('Residence Risk API', () => {
 			expect(response.status).toBe(404);
 		});
 	});
+
+	describe('GET /v1/openapi.json', () => {
+		it('returns an OpenAPI 3.1 document', async () => {
+			const response = await SELF.fetch('https://example.com/v1/openapi.json');
+			expect(response.status).toBe(200);
+			const body = await response.json<{ openapi: string; paths: Record<string, unknown> }>();
+			expect(body.openapi).toBe('3.1.0');
+			expect(body.paths['/v1/assess']).toBeDefined();
+			expect(response.headers.get('Cache-Control')).toMatch(/public/);
+		});
+	});
+
+	describe('GET /.well-known/ai-plugin.json', () => {
+		it('returns the plugin manifest', async () => {
+			const response = await SELF.fetch('https://example.com/.well-known/ai-plugin.json');
+			expect(response.status).toBe(200);
+			const body = await response.json<{ name_for_model: string; api: { url: string } }>();
+			expect(body.name_for_model).toBe('residence_risk_tw');
+			expect(body.api.url).toContain('/v1/openapi.json');
+		});
+	});
+
+	describe('GET /llms.txt', () => {
+		it('returns a plain text index', async () => {
+			const response = await SELF.fetch('https://example.com/llms.txt');
+			expect(response.status).toBe(200);
+			expect(response.headers.get('Content-Type')).toMatch(/text\/plain/);
+			const body = await response.text();
+			expect(body).toContain('Residence Risk TW');
+		});
+	});
+
+	describe('POST /mcp', () => {
+		it('responds to initialize', async () => {
+			const response = await SELF.fetch('https://example.com/mcp', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+			});
+			expect(response.status).toBe(200);
+			const body = await response.json<{ result: { protocolVersion: string; serverInfo: { name: string } } }>();
+			expect(body.result.serverInfo.name).toBe('residence-risk-tw');
+			expect(body.result.protocolVersion).toBeTruthy();
+		});
+
+		it('lists the assess_residence_risk tool', async () => {
+			const response = await SELF.fetch('https://example.com/mcp', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+			});
+			expect(response.status).toBe(200);
+			const body = await response.json<{ result: { tools: { name: string }[] } }>();
+			expect(body.result.tools[0].name).toBe('assess_residence_risk');
+		});
+
+		it('returns -32601 for unknown methods', async () => {
+			const response = await SELF.fetch('https://example.com/mcp', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'does/not/exist' }),
+			});
+			expect(response.status).toBe(200);
+			const body = await response.json<{ error: { code: number } }>();
+			expect(body.error.code).toBe(-32601);
+		});
+	});
 });
 
 describe('assessEarthquake', () => {

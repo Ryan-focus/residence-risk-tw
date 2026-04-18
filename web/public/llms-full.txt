@@ -1,0 +1,169 @@
+# Residence Risk TW — 完整 AI 索引
+
+## 專案定位
+
+Residence Risk TW 是整合台灣政府公開資料的住址風險評估系統。使用者輸入台灣地址後，系統自動地理編碼並查詢淹水與地震資料庫，回傳 0–100 分五級風險分數，含互動式地圖與情境明細。
+
+- 授權：核心引擎 AGPL-3.0、資料管線 MIT、文件 CC BY 4.0
+- 語言：zh-Hant-TW 為主，API 回傳為 JSON（欄位名為英文，文字為中文）
+- 適用範圍：**僅限台灣（含本島 + 外島的既有淹水潛勢圖覆蓋區）**
+- 使用性質：**防災參考**。依《水災潛勢資料公開辦法》，不得作為土地使用、不動產交易、保險核保、金融授信之決策依據
+
+## 技術架構
+
+- 前端：Next.js 14 (Static Export) + Tailwind CSS，託管於 Cloudflare Pages
+- 地圖：Leaflet + react-leaflet + OpenStreetMap
+- API：Cloudflare Workers (TypeScript)
+- 資料庫：Cloudflare D1 (SQLite)，bbox + Haversine 距離查詢
+- 地理編碼：Map8 台灣圖霸（優先）+ Nominatim（降級）；漸進式降級 完整地址 → 路 → 區 → 市
+- 座標系：TWD97 EPSG:3826 → WGS84 EPSG:4326（pyproj）
+- 測試：Vitest + `@cloudflare/vitest-pool-workers`
+
+## 主要 API 端點
+
+### `GET /v1/health`
+
+健康檢查，含 D1 連線狀態。
+
+Response:
+```json
+{ "status": "ok", "database": "connected", "timestamp": "2026-04-18T01:23:45.000Z" }
+```
+
+### `GET /v1/meta/versions`
+
+回傳所有匯入資料源的版本、機關、匯入時間、記錄數。
+
+### `GET /v1/openapi.json`
+
+OpenAPI 3.1 規格，agent 可直接綁定。
+
+### `POST /v1/assess`
+
+主要評估端點。
+
+Request:
+```json
+{ "address": "台北市信義區信義路五段7號" }
+```
+
+限制：Content-Length ≤ 4096 bytes、address ≤ 200 字。
+
+Response 200:
+```json
+{
+  "address": "台北市信義區信義路五段7號",
+  "location": {
+    "lat": 25.033,
+    "lng": 121.567,
+    "source": "nominatim",
+    "display_name": "信義區, 臺北市, 臺灣"
+  },
+  "flood": {
+    "score": 95,
+    "level": "極高",
+    "color": "#ef4444",
+    "risks": [
+      { "scenario": "24h_350mm", "duration_hours": 24, "rainfall_mm": 350, "depth_class": "0-50cm", "distance_m": null }
+    ],
+    "disclaimer": "..."
+  },
+  "earthquake": {
+    "score": 86,
+    "level": "極高",
+    "color": "#ef4444",
+    "fault": { "score": 90, "risks": [ { "fault_name": "車籠埔斷層", "fault_class": 1, "distance_m": null } ] },
+    "liquefaction": { "score": 80, "has_data": true, "risks": [ { "level": "高", "distance_m": null } ] },
+    "disclaimer": "..."
+  },
+  "meta": { "response_ms": 1351, "api_version": "0.2.0-dev" },
+  "disclaimer": "本工具使用政府公開資料，僅供防災參考..."
+}
+```
+
+錯誤碼：
+
+| HTTP | Code | 說明 |
+|------|------|------|
+| 400 | INVALID_ADDRESS | 地址格式無法辨識或超過 200 字 |
+| 400 | INVALID_REQUEST | 請求格式錯誤（非 JSON 或缺 address 欄位）|
+| 404 | ADDRESS_NOT_FOUND | 地理編碼找不到對應位置 |
+| 413 | PAYLOAD_TOO_LARGE | 請求內容超過 4KB |
+| 500 | INTERNAL_ERROR | 伺服器內部錯誤 |
+
+## 淹水評分標準（v0.2）
+
+採用定量降雨情境（非重現期）：
+
+| 條件 | 分數 | 等級 |
+|------|------|------|
+| 24h 350mm 淹水 > 50cm | 95 | 極高 |
+| 24h 350mm 淹水 0–50cm | 80 | 高 |
+| 24h 500mm 淹水 > 50cm | 65 | 中高 |
+| 24h 500mm 淹水 0–50cm | 50 | 中 |
+| 24h 650mm 才有淹水 | 30 | 低 |
+| 距淹水區 < 100m | 20 | 低 |
+| 無淹水潛勢 | 5 | 極低 |
+
+## 地震評分標準
+
+斷層子分數（取最大值）：
+
+| 條件 | 分數 |
+|------|------|
+| 點在第一類敏感區內 | 90 |
+| 點在第二類敏感區內 | 70 |
+| 距第一類 < 200m | 55 |
+| 距第二類 < 200m | 45 |
+| 距第一類 < 500m | 35 |
+| 距第二類 < 500m | 25 |
+| 更遠 | 10 |
+| 查無資料 | 5 |
+
+液化子分數：高 / 中 / 低 潛勢區內 → 80 / 50 / 20；無資料 → 5。
+
+綜合：有液化資料 `0.6 × 斷層 + 0.4 × 液化`；無液化資料的縣市僅用斷層分數。
+
+五級對照：81–100 極高、61–80 高、41–60 中、21–40 低、0–20 極低。
+
+## 隱私與安全
+
+- 地址僅以 SHA-256 hash 存入 30 天快取，不儲存明文地址
+- CORS 白名單透過環境變數（ALLOWED_ORIGINS）管理
+- 安全標頭：X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Content-Security-Policy
+- 請求大小限制 4KB、地址長度 200 字、SQL 參數化
+
+## 資料來源
+
+- 淹水潛勢圖：經濟部水利署，https://data.gov.tw/dataset/25766，政府資料開放授權 v1
+- 活動斷層地質敏感區：中央地質調查所，https://data.gov.tw/dataset/100220
+- 土壤液化潛勢圖：經濟部地質調查及礦業管理中心，https://data.gov.tw/dataset/28691
+- 地理編碼：Map8 圖霸（商業授權）+ Nominatim（ODbL）
+- 底圖：OpenStreetMap（ODbL）
+
+## 給 AI Agent 的使用建議
+
+1. **呼叫模式**：單次 `POST /v1/assess`，約 1–2 秒回應。不要 batch 高於 1 req/s，以免打到 Nominatim rate limit。
+2. **地址格式**：支援中文完整地址（含縣市、區、路、號）；英文地址請先轉為中文；若使用者只給區或路，系統會漸進降級回傳該區中心點。
+3. **回應解讀**：`score` 越高風險越高。`color` 為十六進位 CSS 色碼，已對應五級。若 `earthquake.liquefaction.has_data === false`，代表該縣市尚無液化資料，綜合分數僅採斷層。
+4. **免責聲明**：在最終回答中**務必**轉述 `disclaimer`，不得省略。
+5. **範圍限制**：若 `ADDRESS_NOT_FOUND`，代表地址非台灣或超出資料覆蓋。
+
+## MCP Server
+
+此 API 亦提供 MCP (Model Context Protocol) 端點：`POST /mcp`，實作 `tools/list` 與 `tools/call`（tool: `assess_residence_risk`）。適合接入 Claude Desktop、Cursor 等 MCP client。
+
+## Skill 調用（Claude Agent SDK）
+
+專案提供 `skills/residence-risk/SKILL.md`，可直接複製到其他 Claude Code 專案使用。
+
+## 開發路線
+
+已完成：API 基礎、淹水（19 縣市）、地理編碼、淹水評分、前端 MVP、雲端部署、地震（斷層+液化）。
+
+規劃中：空氣品質風險、PDF 報告、公開 REST API。
+
+## 聯絡
+
+- GitHub issue：https://github.com/Ryan-focus/residence-risk-tw/issues
+- 授權與 attribution：請依 AGPL-3.0 與各資料集政府資料開放授權 v1 標示來源

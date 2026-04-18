@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Residence Risk TW",
+  "name_for_model": "residence_risk_tw",
+  "description_for_human": "輸入台灣地址，免費查詢淹水與地震風險。資料來源為政府公開平台。",
+  "description_for_model": "Assess flood (24h 350/500/650mm rainfall scenarios) and earthquake (active fault + soil liquefaction) risk for any Taiwanese residential address. Accepts a traditional-Chinese address string, returns a 0-100 score per hazard with level, color, scenario breakdown, and geocoded location. Sources: Taiwan gov open data. Not for legal, real-estate, insurance or lending decisions.",
+  "auth": { "type": "none" },
+  "api": {
+    "type": "openapi",
+    "url": "https://residence-risk-web.pages.dev/openapi.json"
+  },
+  "logo_url": "https://residence-risk-web.pages.dev/favicon.ico",
+  "contact_email": "noreply@residence-risk-web.pages.dev",
+  "legal_info_url": "https://github.com/Ryan-focus/residence-risk-tw/blob/main/LICENSE"
+}

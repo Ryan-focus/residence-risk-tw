@@ -236,6 +236,18 @@ wrangler pages deploy out --project-name your-project
 | 413 | `PAYLOAD_TOO_LARGE` | 請求內容超過 4KB |
 | 500 | `INTERNAL_ERROR` | 伺服器內部錯誤 |
 
+### AI / Agent 友善端點
+
+| 路徑 | 內容 |
+|------|------|
+| `GET /v1/openapi.json` | OpenAPI 3.1 規格（同步鏡像至前端 `/openapi.json`） |
+| `GET /.well-known/ai-plugin.json` | ChatGPT Action / Claude plugin 描述 |
+| `GET /.well-known/mcp.json` | MCP server descriptor |
+| `GET/POST /mcp` | MCP (JSON-RPC 2.0) streamable-HTTP 端點，暴露 `assess_residence_risk` 工具 |
+| `GET /llms.txt` | LLM 索引（API 端） |
+
+前端另外提供 `/llms.txt`、`/llms-full.txt`、`/robots.txt`、`/sitemap.xml`、`/opengraph-image`。詳見 [`AGENTS.md`](AGENTS.md) 與 [`skills/residence-risk/SKILL.md`](skills/residence-risk/SKILL.md)。
+
 ## 專案結構
 
 ```
