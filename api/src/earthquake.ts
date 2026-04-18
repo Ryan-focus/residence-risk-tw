@@ -74,6 +74,36 @@ export interface EarthquakeAssessment {
 
 import { pointInGeoJSON, insideBboxFallback } from './geo';
 
+/**
+ * 兩階段查詢的第二階段：對那些 bbox 實際包含查詢點的候選，額外撈 geojson。
+ * 這樣能把每次 request 的 D1 回傳大小壓在合理範圍（避免 D1 1 MB limit 爆掉）。
+ */
+async function fetchGeojsonForBboxHits<
+	T extends {
+		id: number;
+		bbox_min_lat: number;
+		bbox_min_lng: number;
+		bbox_max_lat: number;
+		bbox_max_lng: number;
+	},
+>(db: D1Database, table: string, lat: number, lng: number, candidates: T[]): Promise<Map<number, string | null>> {
+	const bboxHits = candidates.filter(
+		(r) => lat >= r.bbox_min_lat && lat <= r.bbox_max_lat && lng >= r.bbox_min_lng && lng <= r.bbox_max_lng,
+	);
+	const map = new Map<number, string | null>();
+	if (bboxHits.length === 0) return map;
+
+	// 限制每次最多撈 10 個 geojson（極保守，防 CPU / response size 爆）
+	const ids = bboxHits.slice(0, 10).map((r) => r.id);
+	const placeholders = ids.map(() => '?').join(',');
+	const { results } = await db
+		.prepare(`SELECT id, geojson FROM ${table} WHERE id IN (${placeholders})`)
+		.bind(...ids)
+		.all<{ id: number; geojson: string | null }>();
+	for (const r of results) map.set(r.id, r.geojson);
+	return map;
+}
+
 /** Haversine 距離（公尺） */
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
 	const R = 6371000;
@@ -135,11 +165,11 @@ export async function assessEarthquake(
 ): Promise<EarthquakeAssessment> {
 	const buffer = 0.01; // ~1km 搜尋範圍
 
-	// ── 斷層敏感區查詢 ──────────────────────────────────────────
-	const { results: faultRows } = await db
+	// ── 斷層敏感區查詢（兩階段：先 bbox，再針對 bbox 命中的候選撈 geojson） ─
+	const { results: faultCandidates } = await db
 		.prepare(
-			`SELECT fault_name, fault_class, center_lat, center_lng,
-			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, geojson
+			`SELECT id, fault_name, fault_class, center_lat, center_lng,
+			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng
 			 FROM rrw_fault_zones
 			 WHERE bbox_min_lat <= ?1 + ?3 AND bbox_max_lat >= ?1 - ?3
 			   AND bbox_min_lng <= ?2 + ?3 AND bbox_max_lng >= ?2 - ?3
@@ -147,6 +177,7 @@ export async function assessEarthquake(
 		)
 		.bind(lat, lng, buffer)
 		.all<{
+			id: number;
 			fault_name: string;
 			fault_class: number;
 			center_lat: number;
@@ -155,23 +186,29 @@ export async function assessEarthquake(
 			bbox_min_lng: number;
 			bbox_max_lat: number;
 			bbox_max_lng: number;
-			geojson: string | null;
 		}>();
 
-	const faultRisks: FaultRisk[] = faultRows.map((r) => {
+	const faultGeojsonMap = await fetchGeojsonForBboxHits(db, 'rrw_fault_zones', lat, lng, faultCandidates);
+
+	const faultRisks: FaultRisk[] = faultCandidates.map((r) => {
 		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
-		const inside = r.geojson
-			? pointInGeoJSON(lat, lng, r.geojson)
-			: insideBboxFallback(
-					lat,
-					lng,
-					r.bbox_min_lat,
-					r.bbox_min_lng,
-					r.bbox_max_lat,
-					r.bbox_max_lng,
-					r.center_lat,
-					r.center_lng,
-				);
+		const inBbox = lat >= r.bbox_min_lat && lat <= r.bbox_max_lat && lng >= r.bbox_min_lng && lng <= r.bbox_max_lng;
+		const geojson = faultGeojsonMap.get(r.id);
+		let inside = false;
+		if (inBbox) {
+			inside = geojson
+				? pointInGeoJSON(lat, lng, geojson)
+				: insideBboxFallback(
+						lat,
+						lng,
+						r.bbox_min_lat,
+						r.bbox_min_lng,
+						r.bbox_max_lat,
+						r.bbox_max_lng,
+						r.center_lat,
+						r.center_lng,
+					);
+		}
 		return {
 			fault_name: r.fault_name,
 			fault_class: r.fault_class as 1 | 2,
@@ -179,11 +216,11 @@ export async function assessEarthquake(
 		};
 	});
 
-	// ── 液化潛勢查詢 ─────────────────────────────────────────────
-	const { results: liqRows } = await db
+	// ── 液化潛勢查詢（兩階段） ─────────────────────────────────
+	const { results: liqCandidates } = await db
 		.prepare(
-			`SELECT level, center_lat, center_lng,
-			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng, geojson
+			`SELECT id, level, center_lat, center_lng,
+			        bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng
 			 FROM rrw_liquefaction_zones
 			 WHERE bbox_min_lat <= ?1 + ?3 AND bbox_max_lat >= ?1 - ?3
 			   AND bbox_min_lng <= ?2 + ?3 AND bbox_max_lng >= ?2 - ?3
@@ -191,6 +228,7 @@ export async function assessEarthquake(
 		)
 		.bind(lat, lng, buffer)
 		.all<{
+			id: number;
 			level: string;
 			center_lat: number;
 			center_lng: number;
@@ -198,23 +236,29 @@ export async function assessEarthquake(
 			bbox_min_lng: number;
 			bbox_max_lat: number;
 			bbox_max_lng: number;
-			geojson: string | null;
 		}>();
 
-	const liqRisks: LiquefactionRisk[] = liqRows.map((r) => {
+	const liqGeojsonMap = await fetchGeojsonForBboxHits(db, 'rrw_liquefaction_zones', lat, lng, liqCandidates);
+
+	const liqRisks: LiquefactionRisk[] = liqCandidates.map((r) => {
 		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
-		const inside = r.geojson
-			? pointInGeoJSON(lat, lng, r.geojson)
-			: insideBboxFallback(
-					lat,
-					lng,
-					r.bbox_min_lat,
-					r.bbox_min_lng,
-					r.bbox_max_lat,
-					r.bbox_max_lng,
-					r.center_lat,
-					r.center_lng,
-				);
+		const inBbox = lat >= r.bbox_min_lat && lat <= r.bbox_max_lat && lng >= r.bbox_min_lng && lng <= r.bbox_max_lng;
+		const geojson = liqGeojsonMap.get(r.id);
+		let inside = false;
+		if (inBbox) {
+			inside = geojson
+				? pointInGeoJSON(lat, lng, geojson)
+				: insideBboxFallback(
+						lat,
+						lng,
+						r.bbox_min_lat,
+						r.bbox_min_lng,
+						r.bbox_max_lat,
+						r.bbox_max_lng,
+						r.center_lat,
+						r.center_lng,
+					);
+		}
 		return {
 			level: r.level as '高' | '中' | '低',
 			distance_m: inside ? null : Math.round(centroidDistM),

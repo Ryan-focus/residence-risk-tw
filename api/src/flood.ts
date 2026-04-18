@@ -52,7 +52,11 @@ function scoreFlood(risks: FloodRisk[]): { score: number; level: string; color: 
 
 	for (const r of risks) {
 		const inside = r.distance_m === null || r.distance_m === 0;
-		const nearby100 = r.distance_m !== null && r.distance_m <= 100;
+		const d = r.distance_m;
+		// near30 / near100：因 SHP 向量化 + geocode 精度，地址常落在淹水 polygon 邊幾十公尺，
+		// 使用嚴重性分級給予「邊緣分數」避免 undervalued。
+		const near30 = d !== null && d <= 30;
+		const near100 = d !== null && d <= 100;
 		let s = 5;
 
 		if (r.rainfall_mm <= 350 && inside) {
@@ -61,7 +65,15 @@ function scoreFlood(risks: FloodRisk[]): { score: number; level: string; color: 
 			s = r.depth_class === '0-50cm' ? 50 : 65;
 		} else if (r.rainfall_mm <= 650 && inside) {
 			s = 30;
-		} else if (nearby100) {
+		} else if (r.rainfall_mm <= 350 && near30) {
+			// 350mm 淹水區邊緣 30m 內 → 視同輕度 inside
+			s = r.depth_class === '0-50cm' ? 60 : 75;
+		} else if (r.rainfall_mm <= 500 && near30) {
+			s = r.depth_class === '0-50cm' ? 40 : 50;
+		} else if (r.rainfall_mm <= 350 && near100) {
+			// 350mm 淹水區 100m 內（更遠的緩衝）
+			s = 35;
+		} else if (near100) {
 			s = 20;
 		}
 
@@ -175,18 +187,19 @@ export async function assessFlood(db: D1Database, lat: number, lng: number): Pro
 	// 搜尋半徑 ~500m（約 0.005 度）
 	const buffer = 0.005;
 
-	const { results } = await db
+	// 階段 1：只撈 bbox/centroid（不含 geojson），避免 D1 回傳過大
+	const { results: candidates } = await db
 		.prepare(
-			`SELECT rainfall_scenario, duration_hours, rainfall_mm, depth_class,
-					center_lat, center_lng, bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng,
-					geojson
+			`SELECT id, rainfall_scenario, duration_hours, rainfall_mm, depth_class,
+					center_lat, center_lng, bbox_min_lat, bbox_min_lng, bbox_max_lat, bbox_max_lng
 			 FROM rrw_flood_zones
 			 WHERE bbox_min_lat <= ?1 + ?5 AND bbox_max_lat >= ?1 - ?5
 			   AND bbox_min_lng <= ?2 + ?5 AND bbox_max_lng >= ?2 - ?5
-			 LIMIT 50`,
+			 LIMIT 200`,
 		)
 		.bind(lat, lng, lat, lng, buffer)
 		.all<{
+			id: number;
 			rainfall_scenario: string;
 			duration_hours: number;
 			rainfall_mm: number;
@@ -197,27 +210,49 @@ export async function assessFlood(db: D1Database, lat: number, lng: number): Pro
 			bbox_min_lng: number;
 			bbox_max_lat: number;
 			bbox_max_lng: number;
-			geojson: string | null;
 		}>();
 
-	const risks: FloodRisk[] = results
+	// 階段 2：只對「bbox 包含查詢點」的候選 polygon 撈 geojson 做精準判定
+	const bboxHits = candidates.filter(
+		(r) => lat >= r.bbox_min_lat && lat <= r.bbox_max_lat && lng >= r.bbox_min_lng && lng <= r.bbox_max_lng,
+	);
+
+	const geojsonMap = new Map<number, string | null>();
+	if (bboxHits.length > 0) {
+		// 限 30 個以控 CPU／回傳大小
+		const ids = bboxHits.slice(0, 30).map((r) => r.id);
+		const placeholders = ids.map(() => '?').join(',');
+		const { results: geoRows } = await db
+			.prepare(`SELECT id, geojson FROM rrw_flood_zones WHERE id IN (${placeholders})`)
+			.bind(...ids)
+			.all<{ id: number; geojson: string | null }>();
+		for (const g of geoRows) geojsonMap.set(g.id, g.geojson);
+	}
+
+	const risks: FloodRisk[] = candidates
 		.map((row) => {
 			const centroidDistM = haversineM(lat, lng, row.center_lat, row.center_lng);
+			const geojson = geojsonMap.get(row.id);
 
-			// Tier 1: 有 geojson → 真正 point-in-polygon（最精準）
-			// Tier 2: 無 geojson → 適應性 bbox + centroid 距離 fallback
-			const inside = row.geojson
-				? pointInGeoJSON(lat, lng, row.geojson)
-				: insideBboxFallback(
-						lat,
-						lng,
-						row.bbox_min_lat,
-						row.bbox_min_lng,
-						row.bbox_max_lat,
-						row.bbox_max_lng,
-						row.center_lat,
-						row.center_lng,
-					);
+			// Tier 1: bbox 內 + 有 geojson → 真正 point-in-polygon
+			// Tier 2: bbox 內但沒撈到 geojson（超量被截斷）→ 用 adaptive fallback
+			// Tier 3: bbox 外 → 只看距離
+			let inside = false;
+			const inBbox = lat >= row.bbox_min_lat && lat <= row.bbox_max_lat && lng >= row.bbox_min_lng && lng <= row.bbox_max_lng;
+			if (inBbox) {
+				inside = geojson
+					? pointInGeoJSON(lat, lng, geojson)
+					: insideBboxFallback(
+							lat,
+							lng,
+							row.bbox_min_lat,
+							row.bbox_min_lng,
+							row.bbox_max_lat,
+							row.bbox_max_lng,
+							row.center_lat,
+							row.center_lng,
+						);
+			}
 
 			return {
 				scenario: row.rainfall_scenario,
@@ -227,7 +262,6 @@ export async function assessFlood(db: D1Database, lat: number, lng: number): Pro
 				distance_m: inside ? null : Math.round(centroidDistM),
 			};
 		})
-		// bbox 粗篩後仍可能撈到距離 >500m 的大 polygon 邊角，過濾掉
 		.filter((r) => r.distance_m === null || r.distance_m <= 500);
 
 	const { score, level, color } = scoreFlood(risks);
