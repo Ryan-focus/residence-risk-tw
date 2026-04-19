@@ -104,6 +104,17 @@ async function fetchGeojsonForBboxHits<
 	return map;
 }
 
+/** 點到 bbox 最近邊緣的距離（公尺）；點在 bbox 內時回傳 0 */
+function bboxEdgeDistM(
+	lat: number, lng: number,
+	minLat: number, minLng: number,
+	maxLat: number, maxLng: number,
+): number {
+	const clampedLat = Math.max(minLat, Math.min(maxLat, lat));
+	const clampedLng = Math.max(minLng, Math.min(maxLng, lng));
+	return haversineM(lat, lng, clampedLat, clampedLng);
+}
+
 /** Haversine 距離（公尺） */
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
 	const R = 6371000;
@@ -191,7 +202,6 @@ export async function assessEarthquake(
 	const faultGeojsonMap = await fetchGeojsonForBboxHits(db, 'rrw_fault_zones', lat, lng, faultCandidates);
 
 	const faultRisks: FaultRisk[] = faultCandidates.map((r) => {
-		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
 		const inBbox = lat >= r.bbox_min_lat && lat <= r.bbox_max_lat && lng >= r.bbox_min_lng && lng <= r.bbox_max_lng;
 		const geojson = faultGeojsonMap.get(r.id);
 		let inside = false;
@@ -209,10 +219,11 @@ export async function assessEarthquake(
 						r.center_lng,
 					);
 		}
+		const distM = inside ? 0 : bboxEdgeDistM(lat, lng, r.bbox_min_lat, r.bbox_min_lng, r.bbox_max_lat, r.bbox_max_lng);
 		return {
 			fault_name: r.fault_name,
 			fault_class: r.fault_class as 1 | 2,
-			distance_m: inside ? null : Math.round(centroidDistM),
+			distance_m: inside ? null : Math.round(distM),
 		};
 	});
 
@@ -241,7 +252,6 @@ export async function assessEarthquake(
 	const liqGeojsonMap = await fetchGeojsonForBboxHits(db, 'rrw_liquefaction_zones', lat, lng, liqCandidates);
 
 	const liqRisks: LiquefactionRisk[] = liqCandidates.map((r) => {
-		const centroidDistM = haversineM(lat, lng, r.center_lat, r.center_lng);
 		const inBbox = lat >= r.bbox_min_lat && lat <= r.bbox_max_lat && lng >= r.bbox_min_lng && lng <= r.bbox_max_lng;
 		const geojson = liqGeojsonMap.get(r.id);
 		let inside = false;
@@ -259,9 +269,10 @@ export async function assessEarthquake(
 						r.center_lng,
 					);
 		}
+		const distM = inside ? 0 : bboxEdgeDistM(lat, lng, r.bbox_min_lat, r.bbox_min_lng, r.bbox_max_lat, r.bbox_max_lng);
 		return {
 			level: r.level as '高' | '中' | '低',
-			distance_m: inside ? null : Math.round(centroidDistM),
+			distance_m: inside ? null : Math.round(distM),
 		};
 	});
 

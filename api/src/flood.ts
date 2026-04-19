@@ -195,7 +195,8 @@ export async function assessFlood(db: D1Database, lat: number, lng: number): Pro
 			 FROM rrw_flood_zones
 			 WHERE bbox_min_lat <= ?1 + ?5 AND bbox_max_lat >= ?1 - ?5
 			   AND bbox_min_lng <= ?2 + ?5 AND bbox_max_lng >= ?2 - ?5
-			 LIMIT 200`,
+			 ORDER BY (bbox_max_lat - bbox_min_lat) * (bbox_max_lng - bbox_min_lng) ASC
+			 LIMIT 500`,
 		)
 		.bind(lat, lng, lat, lng, buffer)
 		.all<{
