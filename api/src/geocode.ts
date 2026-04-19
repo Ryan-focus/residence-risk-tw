@@ -50,13 +50,18 @@ async function lookupCache(db: D1Database, hash: string): Promise<GeocodingResul
 }
 
 async function writeCache(db: D1Database, hash: string, result: GeocodingResult): Promise<void> {
-	await db
-		.prepare(
-			`INSERT OR REPLACE INTO rrw_geocode_cache (address_hash, lat, lng, source, accuracy_m, cached_at)
-			 VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-		)
-		.bind(hash, result.lat, result.lng, result.source, result.accuracy_m)
-		.run();
+	try {
+		await db
+			.prepare(
+				`INSERT OR REPLACE INTO rrw_geocode_cache (address_hash, lat, lng, source, accuracy_m, cached_at)
+				 VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+			)
+			.bind(hash, result.lat, result.lng, result.source, result.accuracy_m)
+			.run();
+	} catch (err) {
+		// Cache write failure is non-fatal — geocoding result is still returned.
+		console.warn('geocode cache write failed:', err);
+	}
 }
 
 // ── Map8 台灣圖霸 ─────────────────────────────────────────────────────────────

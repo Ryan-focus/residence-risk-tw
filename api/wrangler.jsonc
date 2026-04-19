@@ -20,5 +20,9 @@
 	"vars": {
 		// 本機開發用空值；正式環境請執行：wrangler secret put MAP8_API_KEY
 		"MAP8_API_KEY": ""
+	},
+	"triggers": {
+		// 每月 1 日 02:00 UTC（台北時間 10:00）自動刷新 CWB 歷史地震
+		"crons": ["0 2 1 * *"]
 	}
 }

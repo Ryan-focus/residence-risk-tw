@@ -8,6 +8,7 @@ import { assessFlood } from './flood';
 import { assessEarthquake } from './earthquake';
 import { buildOpenApiSpec, API_VERSION } from './openapi';
 import { handleMcp } from './mcp';
+import { refreshCwbEarthquakeHistory } from './cwb-refresh';
 
 interface ErrorBody {
 	error: string;
@@ -392,6 +393,20 @@ export default {
 		} catch (err) {
 			console.error('Unhandled error:', err);
 			return withCors(errorResponse(500, 'INTERNAL_ERROR', '伺服器內部錯誤'), request, env, pathname);
+		}
+	},
+
+	async scheduled(_event, env, _ctx): Promise<void> {
+		const apiKey = (env as unknown as Record<string, string>).CWB_API_KEY ?? '';
+		if (!apiKey) {
+			console.error('[cron] CWB_API_KEY not set — skipping earthquake history refresh');
+			return;
+		}
+		try {
+			const result = await refreshCwbEarthquakeHistory(env.DB, apiKey);
+			console.log(`[cron] CWB refresh done: upserted=${result.upserted} skipped=${result.skipped}`);
+		} catch (err) {
+			console.error('[cron] CWB refresh failed:', err);
 		}
 	},
 } satisfies ExportedHandler<Env>;
